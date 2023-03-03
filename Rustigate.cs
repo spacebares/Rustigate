@@ -11,6 +11,9 @@ using Oxide.Core.Plugins;
 using Oxide.Core;
 using System.Linq;
 using UnityEngine;
+using Oxide.Core.Database;
+using System.Text;
+using Facepunch.Extend;
 
 namespace Oxide.Plugins
 {
@@ -18,7 +21,11 @@ namespace Oxide.Plugins
     [Description("Automatic demo recording of players when they attack others, with discord notifications and ingame event browser.")]
     class Rustigate : CovalencePlugin
     {
-        private float TimerSeconds = 5;
+        Core.SQLite.Libraries.SQLite sqlLibrary = Interface.Oxide.GetLibrary<Core.SQLite.Libraries.SQLite>();
+        Connection sqlConnection;
+
+        private float MinEventSeconds = 5;
+        private float MaxEventSeconds = 300;
 
         ///we keep these in memory to avoid having to waste cpu talking with sqlite
         ///todo: this is for sure faster, but is it neccessary? its for sure more memory intensive
@@ -86,6 +93,17 @@ namespace Oxide.Plugins
                 this.RecordTimer = RecordTimer;
             }
 
+            public PlayerEvent(Int32 EventID, DateTime EventTime, string AttackerPlayerName, ulong AttackerPlayerID, string DemoFilename)
+            {
+                this.EventID = EventID;
+
+                this.AttackerID = AttackerPlayerID;
+                this.AttackerName = AttackerPlayerName;
+
+                this.EventTime = EventTime;
+                this.DemoFilename = DemoFilename;
+            }
+
             public void RefreshEventTimer()
             {
                 RecordTimer.Reset();
@@ -114,6 +132,74 @@ namespace Oxide.Plugins
         }
         #endregion
 
+        #region DB
+
+        private void InitializeDB()
+        {
+            sqlConnection = sqlLibrary.OpenDb("RustigateEvents.db", this, true);
+
+            //with the demofiles on disk, we only know two things: Who the demofile belongs to and the time it took place
+            //what we need to help the admin narrow down reports from players: who are the victims in the demofiles
+            //this db keeps track of this so the admin can load up a specific demofile -
+            //- that has the victim player(s) who sent the report in
+            sqlLibrary.ExecuteNonQuery(Sql.Builder.Append(
+                @"CREATE TABLE IF NOT EXISTS `Events` (
+	            `EventID`	INTEGER,
+	            `EventTime`	TEXT,
+	            `AttackerPlayerName`	TEXT,
+	            `AttackerPlayerID`	INTEGER,
+	            `DemoFilename`	TEXT,
+	            PRIMARY KEY(`EventID`)
+            )"), sqlConnection);
+
+            //instead of using string delimeters we store victims like this to save on space & cpu
+            sqlLibrary.ExecuteNonQuery(Sql.Builder.Append(
+                @"CREATE TABLE IF NOT EXISTS `Victims` (
+	            `EventID`	INTEGER,
+	            `VictimName`	TEXT,
+	            `VictimID`	INTEGER
+            )"), sqlConnection);
+        }
+
+        private void LoadDBEvents()
+        {
+            //by loading DB events into memory we avoid having to interface with DB for every little thing
+            //todo: again, is this neccesary ? is this any faster ?
+            {
+                string sqlQuery = "SELECT * FROM Events";
+                Sql selectCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery);
+
+                sqlLibrary.Query(selectCommand, sqlConnection, list =>
+                {
+                    if (list == null)
+                    {
+                        return; // Empty result or no records found
+                    }
+
+                    // Iterate through resulting records
+                    foreach (var entry in list)
+                    {
+                        int EventID = Convert.ToInt32(entry["EventID"]);
+                        DateTime EventTime = DateTime.Parse(Convert.ToString(entry["EventTime"]));
+                        string AttackerPlayerName = Convert.ToString(entry["AttackerPlayerName"]);
+                        ulong AttackerPlayerID = Convert.ToUInt64(entry["AttackerPlayerID"].ToString());
+                        string DemoFilename = Convert.ToString(entry["DemoFilename"]);
+
+                        PlayerEvent NewEvent = new PlayerEvent(EventID, EventTime, AttackerPlayerName, AttackerPlayerID, DemoFilename);
+                        PlayerEvents.Insert(EventID, NewEvent);
+                    }
+                });
+            }
+        }
+
+        #endregion
+
+        private void Init()
+        {
+            InitializeDB();
+            LoadDBEvents();
+        }
+
         private void Unload()
         {
             DebugSay("unloaded");
@@ -134,17 +220,19 @@ namespace Oxide.Plugins
                     Puts("stopping recording for " + player.displayName);
                 }
             }
+
+            sqlLibrary.CloseDb(sqlConnection);
         }
 
-        private void Init()
+        private void Loaded()
         {
-            DebugSay("loaded");
-
             BaseEntity baseEntity = GameManager.server.CreateEntity("assets/prefabs/player/player.prefab", new Vector3(78.3f, 15.0f, -187.8f));
             if (baseEntity != null)
             {
                 baseEntity.Spawn();
-            }
+            } 
+
+            DebugSay("loaded");
         }
 
         private void DebugSay(string message)
@@ -185,11 +273,12 @@ namespace Oxide.Plugins
             string DemoFileName = AttackerPlayer.Connection.RecordFilename;
 
             //use a timer to turn the recording off automatically
-            Timer EventTimer = timer.Once(TimerSeconds, () => EndPlayerEvent(EventID));
+            Timer EventTimer = timer.Once(MinEventSeconds, () => EndPlayerEvent(EventID));
 
             PlayerEvent NewEvent = new PlayerEvent(EventID, AttackerPlayer, VictimPlayer, DemoFileName, EventTimer);
-
             PlayerEvents.Add(NewEvent);
+
+            DebugSay("new event for " + AttackerPlayer.displayName);
         }
 
         private void EndPlayerEvent(Int32 EventID)
@@ -201,8 +290,37 @@ namespace Oxide.Plugins
                 playerEvent.AttackerPlayer.Connection.StopRecording();
                 playerEvent.RecordTimer.Destroy();
 
+                //we save it to DB when the event ends to avoid too many updates during combat
+                {
+                    string sqlQuery = "INSERT INTO Events (`EventID`, `EventTime`, `AttackerPlayerName`, `AttackerPlayerID`, `DemoFilename`) VALUES (@0, @1, @2, @3, @4);";
+                    Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, playerEvent.EventTime, playerEvent.AttackerName, playerEvent.AttackerID, playerEvent.DemoFilename);
+                    sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
+                    {
+                        if (rowsAffected == 0)
+                        {
+                            RaiseError("Could not insert record into DB!");
+                        }
+                    });
+                }
+                {
+                    foreach (var EventVictim in playerEvent.EventVictims)
+                    {
+                        string VictimName = EventVictim.Value.PlayerName;
+                        ulong VictimID = EventVictim.Value.PlayerID;
+                        string sqlQuery = "INSERT INTO Victims (`EventID`, `VictimName`, `VictimID`) VALUES (@0, @1, @2);";
+                        Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, VictimName, VictimID);
+                        sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
+                        {
+                            if (rowsAffected == 0)
+                            {
+                                RaiseError("Could not insert record into DB!");
+                            }
+                        });
+                    }
+                }
+
                 PlayerActiveEventID.Remove(playerEvent.AttackerID);
-                Puts("event " + EventID + " for " + playerEvent.AttackerName + " has ended");
+                DebugSay("event " + EventID + " for " + playerEvent.AttackerName + " has ended");
             }
         }
 
@@ -210,8 +328,8 @@ namespace Oxide.Plugins
         {
             if (attacker != null || info != null)
             {
-                bool bIsSelfDamage = attacker == info.HitEntity.ToPlayer();
-                bool bHitEntityIsPlayer = info.HitEntity.ToPlayer() != null;
+                bool bIsSelfDamage = attacker == info.HitEntity?.ToPlayer();
+                bool bHitEntityIsPlayer = info.HitEntity?.ToPlayer() != null;
 
                 /*
                  * players that attack other players must be recorded
@@ -223,6 +341,7 @@ namespace Oxide.Plugins
                     BasePlayer VictimPlayer = info.HitEntity.ToPlayer();
                     RecordPlayerEvent(attacker, VictimPlayer);
 
+                    //as for the victim being the troublemaker:
                     //the victim can speed hack away and we would see it on the attacker's POV
                     //the victim can return fire and it will just run this function again with the roles reversed
                 }
