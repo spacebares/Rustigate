@@ -14,20 +14,26 @@ using UnityEngine;
 using Oxide.Core.Database;
 using System.Text;
 using Facepunch.Extend;
+using MySql.Data.MySqlClient;
+using static Facepunch.Tick.Entry;
 
 namespace Oxide.Plugins
 {
     [Info("Rustigate", "https://github.com/spacebares", "0.0.1")]
-    [Description("Automatic demo recording of players when they attack others, with discord notifications and ingame event browser.")]
+    [Description("Automatic demo recording of players when they attack others, with discord notifications for related player reports and an ingame event browser.")]
     class Rustigate : CovalencePlugin
     {
         Core.SQLite.Libraries.SQLite sqlLibrary = Interface.Oxide.GetLibrary<Core.SQLite.Libraries.SQLite>();
         Connection sqlConnection;
 
-        private Int32 NextEventID = -1;
+        private Int32 NextEventID = 0;
 
-        private float MinEventSeconds = 5;
-        private float MaxEventSeconds = 300;
+        /*events start the moment a player attacks someone, after MinEventSeconds the event is over and a demo is saved
+        however each time the player attacks someone this timer is reset.*/
+        private float MinEventSeconds = 2;
+        /*regardless of how many times a player attacks others during an event, it will always end after MaxEventSeconds
+         this prevents a malicious player from just attacking someone every <5min to delay the saving of a demo for review*/
+        private float MaxEventSeconds = 6;
 
         ///we keep these in memory to avoid having to waste cpu talking with sqlite
         ///todo: this is for sure faster, but is it neccessary? its for sure more memory intensive
@@ -58,6 +64,13 @@ namespace Oxide.Plugins
                 Player = VictimPlayer;
                 InitialEventPosition = VictimPlayer.ServerPosition;
             }
+
+            public EventVictimInfo(ulong playerID, string playerName, DateTime eventTime)
+            {
+                PlayerID = playerID;
+                PlayerName = playerName;
+                EventTime = eventTime;
+            }
         }
 
         public class PlayerEvent
@@ -76,10 +89,11 @@ namespace Oxide.Plugins
 
             public DateTime EventTime;
             public string DemoFilename;
-            public Timer RecordTimer;
+            public Timer MinEventTimer;
+            public Timer MaxEventTimer;
 
             public PlayerEvent() { }
-            public PlayerEvent(Int32 EventID, BasePlayer AttackerPlayer, BasePlayer VictimPlayer, string DemoFilename, Timer RecordTimer)
+            public PlayerEvent(Int32 EventID, BasePlayer AttackerPlayer, BasePlayer VictimPlayer, string DemoFilename, Timer MinEventTimer, Timer MaxEventTimer)
             {
                 this.EventID = EventID;
 
@@ -92,7 +106,8 @@ namespace Oxide.Plugins
 
                 this.EventTime = DateTime.UtcNow;
                 this.DemoFilename = DemoFilename;
-                this.RecordTimer = RecordTimer;
+                this.MinEventTimer = MinEventTimer;
+                this.MaxEventTimer = MaxEventTimer;
             }
 
             public PlayerEvent(Int32 EventID, DateTime EventTime, string AttackerPlayerName, ulong AttackerPlayerID, string DemoFilename)
@@ -108,7 +123,7 @@ namespace Oxide.Plugins
 
             public void RefreshEventTimer()
             {
-                RecordTimer.Reset();
+                MinEventTimer.Reset();
             }
 
             public void AddEventVictim(BasePlayer VictimPlayer)
@@ -159,7 +174,8 @@ namespace Oxide.Plugins
                 @"CREATE TABLE IF NOT EXISTS `Victims` (
 	            `EventID`	INTEGER,
 	            `VictimName`	TEXT,
-	            `VictimID`	INTEGER
+	            `VictimID`	INTEGER,
+                `EventTime` TEXT
             )"), sqlConnection);
         }
 
@@ -168,35 +184,62 @@ namespace Oxide.Plugins
             //by loading DB events into memory we avoid having to interface with DB for every little thing
             //todo: again, is this neccesary ? is this any faster ?
             {
-                string sqlQuery = "SELECT * FROM Events ORDER by `EventID` ASC";
-                Sql selectCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery);
+                string eventsqlQuery = "SELECT * FROM Events ORDER by `EventID` ASC";
+                Sql eventselectCommand = Oxide.Core.Database.Sql.Builder.Append(eventsqlQuery);
 
-                sqlLibrary.Query(selectCommand, sqlConnection, list =>
+                sqlLibrary.Query(eventselectCommand, sqlConnection, eventlist =>
                 {
-                    if (list == null)
+                    if (eventlist == null)
                     {
                         return; // Empty result or no records found
                     }
 
                     // Iterate through resulting records
-                    foreach (var entry in list)
+                    foreach (var evententry in eventlist)
                     {
-                        Int32 EventID = Convert.ToInt32(entry["EventID"]);
-                        DateTime EventTime = DateTime.Parse(Convert.ToString(entry["EventTime"]));
-                        string AttackerPlayerName = Convert.ToString(entry["AttackerPlayerName"]);
-                        ulong AttackerPlayerID = Convert.ToUInt64(entry["AttackerPlayerID"].ToString());
-                        string DemoFilename = Convert.ToString(entry["DemoFilename"]);
+                        Int32 EventID = Convert.ToInt32(evententry["EventID"]);
+                        DateTime EventTime = DateTime.Parse(Convert.ToString(evententry["EventTime"]));
+                        string AttackerPlayerName = Convert.ToString(evententry["AttackerPlayerName"]);
+                        ulong AttackerPlayerID = Convert.ToUInt64(evententry["AttackerPlayerID"].ToString());
+                        string DemoFilename = Convert.ToString(evententry["DemoFilename"]);
 
                         //the sql query above should have kept the eventids in order...
                         PlayerEvent NewEvent = new PlayerEvent(EventID, EventTime, AttackerPlayerName, AttackerPlayerID, DemoFilename);
                         PlayerEvents.Add(NewEvent);
                         NextEventID = EventID + 1;
-                    }
 
-                    for (int i = 0; i < PlayerEvents.Count; i++)
-                    {
-                        PlayerEvent playerEvent = PlayerEvents[i];
-                        Puts(playerEvent.EventID.ToString() + "[" + i.ToString() + "]");
+                        //victims for the event is stored in a different table,
+                        //check them now because at this time we can garrente the parent query has been completed
+                        ///its also worth noting that the local variables above like NewEvent are inaccessable 
+                        ///since the following code below inside the query runs async at a later time
+                        {
+                            string victimsqlQuery = "SELECT * FROM Victims WHERE `EventID` is @0;";
+                            Sql victimselectCommand = Oxide.Core.Database.Sql.Builder.Append(victimsqlQuery, EventID);
+
+                            sqlLibrary.Query(victimselectCommand, sqlConnection, victimlist =>
+                            {
+                                if (victimlist == null)
+                                {
+                                    return; // Empty result or no records found
+                                }
+
+                                // Iterate through resulting records
+                                foreach (var victimentry in victimlist)
+                                {
+                                    Int32 VictimEventID = Convert.ToInt32(victimentry["EventID"]);
+
+                                    PlayerEvent foundPlayerEvent;
+                                    if (FindPlayerEvent(VictimEventID, out foundPlayerEvent))
+                                    {
+                                        string VictimName = Convert.ToString(victimentry["VictimName"]);
+                                        ulong VictimID = Convert.ToUInt64(victimentry["VictimID"]);
+                                        DateTime VictimEventTime = DateTime.Parse(Convert.ToString(victimentry["EventTime"]));
+
+                                        foundPlayerEvent.EventVictims.Add(VictimID, new EventVictimInfo(VictimID, VictimName, VictimEventTime));
+                                    }
+                                }
+                            });
+                        }
                     }
                 });
 
@@ -204,6 +247,26 @@ namespace Oxide.Plugins
             }
         }
 
+        #endregion
+
+        #region ChatCommands
+        [Command("printevents")]
+        private void PrintEvents(IPlayer player, string command, string[] args)
+        {
+            foreach (var PlayerEvent in PlayerEvents)
+            {
+                Puts("-------------------------------");
+                String s = String.Format("Event :{0} {1}", PlayerEvent.EventID, PlayerEvent.AttackerName);
+                Puts(s);
+                Puts("Victims:");
+                foreach (var EventVictim in PlayerEvent.EventVictims)
+                {
+                    Puts(EventVictim.Value.PlayerName);
+                }
+            }
+
+            player.Reply("Events printed to serbur console");
+        }
         #endregion
 
         private void Init()
@@ -236,10 +299,13 @@ namespace Oxide.Plugins
 
         void OnServerInitialized(bool initial)
         {
-            BaseEntity baseEntity = GameManager.server.CreateEntity("assets/prefabs/player/player.prefab", new Vector3(78.3f, 15.0f, -187.8f));
-            if (baseEntity != null)
+            for (int i = 0; i < 5; i++)
             {
-                baseEntity.Spawn();
+                BaseEntity baseEntity = GameManager.server.CreateEntity("assets/prefabs/player/player.prefab", new Vector3(78.3f, 15.0f, -187.8f));
+                if (baseEntity != null)
+                {
+                    baseEntity.Spawn();
+                }
             }
 
             foreach (var player in BasePlayer.activePlayerList)
@@ -274,10 +340,10 @@ namespace Oxide.Plugins
             if (PlayerActiveEventID.ContainsKey(AttackerPlayer.userID))
             {
                 Int32 ActiveEventID = PlayerActiveEventID[AttackerPlayer.userID];
-                if(PlayerEvents.Count > ActiveEventID)
+                PlayerEvent playerEvent;
+                if (FindPlayerEvent(ActiveEventID, out playerEvent))
                 {
-                    PlayerEvent PlayerEvent = PlayerEvents[ActiveEventID];
-                    PlayerEvent.AddEventVictim(VictimPlayer);
+                    playerEvent.AddEventVictim(VictimPlayer);
                 }
 
                 return;
@@ -294,24 +360,35 @@ namespace Oxide.Plugins
             string DemoFileName = AttackerPlayer.Connection.RecordFilename;
 
             //use a timer to turn the recording off automatically
-            Timer EventTimer = timer.Once(MinEventSeconds, () => EndPlayerEvent(EventID));
+            Timer MinEventTimer = timer.Once(MinEventSeconds, () => EndPlayerEvent(EventID));
+            Timer NaxEventTimer = timer.Once(MaxEventSeconds, () => EndPlayerEvent(EventID));
 
-            PlayerEvent NewEvent = new PlayerEvent(EventID, AttackerPlayer, VictimPlayer, DemoFileName, EventTimer);
+            PlayerEvent NewEvent = new PlayerEvent(EventID, AttackerPlayer, VictimPlayer, DemoFileName, MinEventTimer, NaxEventTimer);
             PlayerEvents.Add(NewEvent);
 
             DebugSay("new event for " + AttackerPlayer.displayName);
         }
 
-        private void EndPlayerEvent(Int32 EventID)
+        private bool FindPlayerEvent(Int32 EventID, out PlayerEvent FoundPlayerEvent)
         {
             //i dont like this Find here but the events list can have holes in it as old ones get pruned
             //cant rely on eventID being the array index... this also means dictionaries are out of the question
             int FoundIDX = PlayerEvents.FindIndex(x => x.EventID == EventID);
             if (FoundIDX == -1)
             {
-                return;
+                FoundPlayerEvent = null;
+                return false;
             }
-            PlayerEvent playerEvent = PlayerEvents[FoundIDX];
+
+            FoundPlayerEvent = PlayerEvents[FoundIDX];
+            return true;
+        }
+
+        private void EndPlayerEvent(Int32 EventID)
+        {
+            PlayerEvent playerEvent;
+            if(!FindPlayerEvent(EventID, out playerEvent))
+                return;
 
             //can only end an event thats active or there wil bee trouble
             bool bIsActiveEvent = PlayerActiveEventID.ContainsKey(playerEvent.AttackerID) ? PlayerActiveEventID[playerEvent.AttackerID] == playerEvent.EventID : false;
@@ -319,7 +396,8 @@ namespace Oxide.Plugins
                 return;
 
             playerEvent.AttackerPlayer.Connection.StopRecording();
-            playerEvent.RecordTimer.Destroy();
+            playerEvent.MinEventTimer.Destroy();
+            playerEvent.MaxEventTimer.Destroy();
 
             //we save it to DB when the event ends to avoid too many updates during combat
             {
@@ -338,8 +416,9 @@ namespace Oxide.Plugins
                 {
                     string VictimName = EventVictim.Value.PlayerName;
                     ulong VictimID = EventVictim.Value.PlayerID;
-                    string sqlQuery = "INSERT INTO Victims (`EventID`, `VictimName`, `VictimID`) VALUES (@0, @1, @2);";
-                    Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, VictimName, VictimID);
+                    DateTime EventTime = EventVictim.Value.EventTime;
+                    string sqlQuery = "INSERT INTO Victims (`EventID`, `VictimName`, `VictimID`, `EventTime`) VALUES (@0, @1, @2, @3);";
+                    Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, VictimName, VictimID, EventTime);
                     sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
                     {
                         if (rowsAffected == 0)
@@ -352,6 +431,21 @@ namespace Oxide.Plugins
 
             PlayerActiveEventID.Remove(playerEvent.AttackerID);
             DebugSay("event " + EventID + " for " + playerEvent.AttackerName + " has ended");
+        }
+
+        private void DeletePlayerEvent(Int32 EventID)
+        {
+            //i dont like this Find here but the events list can have holes in it as old ones get pruned
+            //cant rely on eventID being the array index... this also means dictionaries are out of the question
+            int FoundIDX = PlayerEvents.FindIndex(x => x.EventID == EventID);
+            if (FoundIDX == -1)
+                return;
+
+            string sqlQuery = "DELETE FROM Events WHERE `EventID` = @0;";
+            Sql deleteCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, EventID);
+            sqlLibrary.ExecuteNonQuery(deleteCommand, sqlConnection);
+
+            PlayerEvents.RemoveAt(FoundIDX);
         }
 
         object OnPlayerAttack(BasePlayer attacker, HitInfo info)
