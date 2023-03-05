@@ -16,6 +16,14 @@ using System.Text;
 using Facepunch.Extend;
 using MySql.Data.MySqlClient;
 using static Facepunch.Tick.Entry;
+using Newtonsoft.Json;
+
+//todo: this plugin is going to run into disk space issues due to all the demo files:
+//1. oxide currently has no way of knowing how much diskspace is free on the host
+//2. even if somehow i can get the demos to be within oxides data folder, oxide has no way of deleting files
+//therfor at somepoint the demofiles need to be in a YYYY/MM/DD folder structure
+//this way admin has an easier time pruning old data by just using host filesystem.
+//afterwards its up to the plugin during startup to recognize these files are missing and remove events from DB
 
 namespace Oxide.Plugins
 {
@@ -28,12 +36,20 @@ namespace Oxide.Plugins
 
         private Int32 NextEventID = 0;
 
+        #region Config
+
+        //todo: actually make these config 
+
         /*events start the moment a player attacks someone, after MinEventSeconds the event is over and a demo is saved
         however each time the player attacks someone this timer is reset.*/
         private float MinEventSeconds = 2;
         /*regardless of how many times a player attacks others during an event, it will always end after MaxEventSeconds
          this prevents a malicious player from just attacking someone every <5min to delay the saving of a demo for review*/
-        private float MaxEventSeconds = 6;
+        private float MaxEventSeconds = 10;
+
+        private string DiscordWebhookURL = "REDACTED";
+
+        #endregion
 
         ///we keep these in memory to avoid having to waste cpu talking with sqlite
         ///todo: this is for sure faster, but is it neccessary? its for sure more memory intensive
@@ -267,6 +283,47 @@ namespace Oxide.Plugins
 
             player.Reply("Events printed to serbur console");
         }
+        #endregion
+
+        #region DiscordAPI
+
+        class DiscordMessage
+        {
+            [JsonProperty("content")]
+            public string MessageText { get; set; }
+        }
+
+        private void PostDiscordJson(string payloadJson)
+        {
+            Dictionary<string, string> headers = new Dictionary<string, string>();
+            headers.Add("Content-Type", "application/json");
+
+            webrequest.Enqueue(DiscordWebhookURL, payloadJson, (code, response) => DiscordPostCallBack(code, response), this, Core.Libraries.RequestMethod.POST, headers);
+        }
+        private void DiscordPostCallBack(int code, string response)
+        {
+            if (code != 200 || code != 204)
+            {
+                PrintWarning(String.Format("Discord Api responded with {0}: {1}", code, response));
+            }
+        }
+
+        private void SendDiscordMessage(string TextMessage)
+        {
+            string payloadJson = String.Format("{'content'}:{'{0}'}", TextMessage);
+            PostDiscordJson(payloadJson);
+        }
+
+        private void SendFancyDiscordMessage(string message)
+        {
+            string payloadJson = JsonConvert.SerializeObject(new DiscordMessage()
+            {
+                MessageText = message
+            });
+
+            PostDiscordJson(payloadJson);
+        }
+
         #endregion
 
         private void Init()
