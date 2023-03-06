@@ -1,4 +1,4 @@
-﻿#define DEBUGMODE
+﻿#define DEBUGMODE //this should always remain commented unless you are working on the plugin
 
 using Oxide.Core.Libraries.Covalence;
 using System.ComponentModel;
@@ -17,6 +17,8 @@ using Facepunch.Extend;
 using MySql.Data.MySqlClient;
 using static Facepunch.Tick.Entry;
 using Newtonsoft.Json;
+using System.IO;
+using Random = Oxide.Core.Random;
 
 //todo: this plugin is going to run into disk space issues due to all the demo files:
 //1. oxide currently has no way of knowing how much diskspace is free on the host
@@ -44,6 +46,10 @@ namespace Oxide.Plugins
         ///again is this neccessary? sql select magic can do this as well, these are only here for caching / speedup
         //this contains all the events a player has been involved with
         private Dictionary<ulong, List<Int32>> EventPlayers = new Dictionary<ulong, List<Int32>>();
+
+#if DEBUGMODE
+        private List<BasePlayer> Bots = new List<BasePlayer>();
+#endif
 
         #region Config
 
@@ -166,15 +172,6 @@ namespace Oxide.Plugins
                 //player is actively hitting ppl so keep refreshing timer
                 RefreshEventTimer();
             }
-
-            public List<ulong> GetInvolvedPlayers()
-            {
-                List<ulong> InvolvedPlayers = new List<ulong>();
-                InvolvedPlayers.Add(AttackerID);
-                InvolvedPlayers.AddRange(EventVictims.Keys);
-
-                return InvolvedPlayers;
-            }
         }
         #endregion
 
@@ -279,6 +276,7 @@ namespace Oxide.Plugins
         #endregion
 
         #region ChatCommands
+#if DEBUGMODE
         [Command("printevents")]
         private void PrintEvents(IPlayer player, string command, string[] args)
         {
@@ -296,6 +294,26 @@ namespace Oxide.Plugins
 
             player.Reply("Events printed to serbur console");
         }
+
+        //acts as if one of the bots report u
+        [Command("testselfreport")]
+        private void TestReport(IPlayer player, string command, string[] args)
+        {
+            //all of the bots should be in a team, pick one at random to be the reporter
+            int randomNumber = Oxide.Core.Random.Range(Bots.Count);
+            BasePlayer BotReporter = Bots[randomNumber];
+
+            //first local player is the one who will be reported for their FUKING HAK
+            BasePlayer LocalPlayer = null;
+            foreach (var localplayer in BasePlayer.activePlayerList)
+            {
+                LocalPlayer = localplayer;
+                break;
+            }
+
+            OnPlayerReported(BotReporter, LocalPlayer.displayName, LocalPlayer.UserIDString, "hak", "hes just fuking hak from /testselfreport", "cheat");
+        }
+#endif
         #endregion
 
         #region DiscordAPI
@@ -327,13 +345,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void SendDiscordMessage(string TextMessage)
-        {
-            string payloadJson = String.Format("{'content'}:{'{0}'}", TextMessage);
-            PostDiscordJson(payloadJson);
-        }
-
-        private void SendFancyDiscordMessage(string message)
+        private void SendDiscordMessage(string message)
         {
             string payloadJson = JsonConvert.SerializeObject(new DiscordMessage()
             {
@@ -357,6 +369,17 @@ namespace Oxide.Plugins
 
         private void Unload()
         {
+#if DEBUGMODE
+            Bots[0].Team.Disband();
+            foreach (var Bot in Bots)
+            {
+                if(Bot != null)
+                {
+                    Bot.Kill(BaseNetworkable.DestroyMode.Gib);
+                }
+            }
+#endif
+
             DebugSay("unloaded");
 
             for (Int32 i = 0; i < PlayerEvents.Count; i++)
@@ -379,12 +402,17 @@ namespace Oxide.Plugins
 
         void OnServerInitialized(bool initial)
         {
+#if DEBUGMODE
+            var BotTeam = RelationshipManager.ServerInstance.CreateTeam();
             for (int i = 0; i < 5; i++)
             {
                 BaseEntity baseEntity = GameManager.server.CreateEntity("assets/prefabs/player/player.prefab", new Vector3(78.3f, 15.0f, -187.8f));
                 if (baseEntity != null)
                 {
                     baseEntity.Spawn();
+                    BasePlayer botplayer = baseEntity.ToPlayer();
+                    Bots.Add(botplayer);
+                    BotTeam.AddPlayer(botplayer);
                 }
             }
 
@@ -394,6 +422,7 @@ namespace Oxide.Plugins
             }
 
             DebugSay("loaded");
+#endif
         }
 
         private void Loaded()
@@ -408,6 +437,7 @@ namespace Oxide.Plugins
 
         object OnPlayerAttack(BasePlayer attacker, HitInfo info)
         {
+            //todo: currently nades, rockets, molatov, and similar weapons do not trigger this
             if (attacker != null || info != null)
             {
                 bool bIsSelfDamage = attacker == info.HitEntity?.ToPlayer();
@@ -415,21 +445,75 @@ namespace Oxide.Plugins
 
                 /*
                  * players that attack other players must be recorded
-                 * this way if this player is ever reported by the victim player or their team -
-                 * we know to raise an event in discord
+                 * this way if this player is ever reported by the victim or players on their team -
+                 * - we know to raise an event in discord
                  */
                 if (!bIsSelfDamage && bHitEntityIsPlayer)
                 {
+                    /* there is a case where a player could jokenly report the attacker whos on the same team
+                     only allow enemies to report attackers */
                     BasePlayer VictimPlayer = info.HitEntity.ToPlayer();
-                    RecordPlayerEvent(attacker, VictimPlayer);
+                    if(!IsPlayerTeamedWith(attacker, VictimPlayer))
+                    {
+                        RecordPlayerEvent(attacker, VictimPlayer);
 
-                    //as for the victim being the troublemaker:
-                    //the victim can speed hack away and we would see it on the attacker's POV
-                    //the victim can return fire and it will just run this function again with the roles reversed
+                        //as for the victim being the troublemaker:
+                        //the victim can speed hack away and we would see it on the attacker's POV
+                        //the victim can return fire and it will just run this function again with the victim being POV
+                    }
                 }
             }
 
             return null;
+        }
+
+        void OnPlayerReported(BasePlayer reporter, string targetName, string targetId, string subject, string message, string type)
+        {
+            /* For this plugin's reports, the admin only wants to know two things: 
+               - is there a demofile related to a report
+               - and where is that demofile located.
+            our discord report should contain these, and hopefully todo: a convenient download link as well (this requires an oxide.Ext)
+            there are plenty of other report plugins that will handle normal reports threw discord. we only care about demos.
+            */
+
+            string msg = $"{reporter.displayName} reported {targetName}[{targetId}] for {subject}[{message}].\n";
+            DebugSay($"got a report from {reporter.displayName}!");
+
+            ulong TargetID = Convert.ToUInt64(targetId); 
+            if(TargetID == 0)
+            {
+                //bots dont seem to have a targetId
+                return;
+            }
+
+            /* check and see if the target has an active event, we could complete this hook early for CPU */
+            if (PlayerActiveEventID.ContainsKey(TargetID))
+            {
+                PlayerEvent FoundPlayerEvent = PlayerEvents[PlayerActiveEventID[TargetID]]; ///this should always succeed
+
+                /* the reporter must be involved with the attacker in an event
+                 * either by being the victim or on a team with any of the victims 
+                 * this should help filter out mass reports from unrelated players eg. calling someone out in chat*/
+                if (IsPlayerTeamedWith(reporter, FoundPlayerEvent.EventVictims.Keys.ToList()))
+                {
+                    msg += $"The event is currently active, a demofile will be created at {FoundPlayerEvent.DemoFilename} within {config.MinEventSeconds}-{config.MaxEventSeconds} seconds.";
+                    SendDiscordMessage(msg);
+
+                    //todo: remember inprogress events that had reports in them, so when completed we notify again?
+                    //        a. have to remember anyway to prevent mass spam on the same player, for the same event(s)
+                    //todo: or should we even notify about inprogress events? maybe just when they complete ???
+                    return;
+                }
+            }
+
+            /*there is a chance the victim(s) have won the battle or are retreating 
+             * and do not have time to send in a report for an active event.
+             *
+             * sadly this means once a report comes in, we need to check all events (within reasonable timespan) 
+             * that contain the target as the Attacker, and make sure the reporter is one of the victims
+             * we should return _all_ events that have not been posted to discord related to attacker / victims 
+             * depending on a number of factors this could be expensive on CPU, im prob wrong on how expensive it might be*/
+            //todo
         }
 
         #endregion
@@ -440,6 +524,36 @@ namespace Oxide.Plugins
 #if DEBUGMODE
             server.Command("say", (message));
 #endif
+        }
+
+        private bool IsPlayerTeamedWith(BasePlayer InstigatorPlayer, BasePlayer TargetPlayer)
+        {
+            return InstigatorPlayer == TargetPlayer
+                || InstigatorPlayer.Team != null ? InstigatorPlayer.Team.members.Contains(TargetPlayer.userID) : false;
+        }
+
+        private bool IsPlayerTeamedWith(BasePlayer InstigatorPlayer, ulong TargetPlayerID)
+        {
+            return InstigatorPlayer.userID == TargetPlayerID 
+                || InstigatorPlayer.Team != null ? InstigatorPlayer.Team.members.Contains(TargetPlayerID) : false;
+        }
+
+        private bool IsPlayerTeamedWith(BasePlayer InstigatorPlayer, List<ulong> TargetPlayerIDs)
+        {
+            foreach (var TargetPlayerID in TargetPlayerIDs)
+            {
+                if (InstigatorPlayer.userID == TargetPlayerID)
+                {
+                    return true;
+                }
+
+                if (InstigatorPlayer.Team != null && InstigatorPlayer.Team.members.Contains(TargetPlayerID))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void RecordPlayerEvent(BasePlayer AttackerPlayer, BasePlayer VictimPlayer)
