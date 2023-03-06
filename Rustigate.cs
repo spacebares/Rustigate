@@ -326,6 +326,8 @@ namespace Oxide.Plugins
 
         #endregion
 
+        #region Hooks
+
         private void Init()
         {
             InitializeDB();
@@ -378,6 +380,35 @@ namespace Oxide.Plugins
 
         }
 
+        object OnPlayerAttack(BasePlayer attacker, HitInfo info)
+        {
+            if (attacker != null || info != null)
+            {
+                bool bIsSelfDamage = attacker == info.HitEntity?.ToPlayer();
+                bool bHitEntityIsPlayer = info.HitEntity?.ToPlayer() != null;
+
+                /*
+                 * players that attack other players must be recorded
+                 * this way if this player is ever reported by the victim player or their team -
+                 * we know to raise an event in discord
+                 */
+                if (!bIsSelfDamage && bHitEntityIsPlayer)
+                {
+                    BasePlayer VictimPlayer = info.HitEntity.ToPlayer();
+                    RecordPlayerEvent(attacker, VictimPlayer);
+
+                    //as for the victim being the troublemaker:
+                    //the victim can speed hack away and we would see it on the attacker's POV
+                    //the victim can return fire and it will just run this function again with the roles reversed
+                }
+            }
+
+            return null;
+        }
+
+        #endregion
+
+        #region Rustigate
         private void DebugSay(string message)
         {
 #if DEBUGMODE
@@ -505,30 +536,6 @@ namespace Oxide.Plugins
             PlayerEvents.RemoveAt(FoundIDX);
         }
 
-        object OnPlayerAttack(BasePlayer attacker, HitInfo info)
-        {
-            if (attacker != null || info != null)
-            {
-                bool bIsSelfDamage = attacker == info.HitEntity?.ToPlayer();
-                bool bHitEntityIsPlayer = info.HitEntity?.ToPlayer() != null;
-
-                /*
-                 * players that attack other players must be recorded
-                 * this way if this player is ever reported by the victim player or their team -
-                 * we know to raise an event in discord
-                 */
-                if (!bIsSelfDamage && bHitEntityIsPlayer)
-                {
-                    BasePlayer VictimPlayer = info.HitEntity.ToPlayer();
-                    RecordPlayerEvent(attacker, VictimPlayer);
-
-                    //as for the victim being the troublemaker:
-                    //the victim can speed hack away and we would see it on the attacker's POV
-                    //the victim can return fire and it will just run this function again with the roles reversed
-                }
-            }
-
-            return null;
-        }
+        #endregion
     }
 }
