@@ -38,16 +38,29 @@ namespace Oxide.Plugins
 
         #region Config
 
-        //todo: actually make these config 
+        private class PluginConfig
+        {
+            /*events start the moment a player attacks someone, after MinEventSeconds the event is over and a demo is saved
+            however each time the player attacks someone this timer is reset.*/
+            public Int32 MinEventSeconds;
+            /*regardless of how many times a player attacks others during an event, it will always end after MaxEventSeconds
+            this prevents a malicious player from just attacking someone every <5min to delay the saving of a demo for review*/
+            public Int32 MaxEventSeconds;
+            //set this to your server's webhook URL that you setup via https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks
+            public string DiscordWebhookURL;
+        }
 
-        /*events start the moment a player attacks someone, after MinEventSeconds the event is over and a demo is saved
-        however each time the player attacks someone this timer is reset.*/
-        private float MinEventSeconds = 2;
-        /*regardless of how many times a player attacks others during an event, it will always end after MaxEventSeconds
-         this prevents a malicious player from just attacking someone every <5min to delay the saving of a demo for review*/
-        private float MaxEventSeconds = 10;
+        private PluginConfig GetDefaultConfig()
+        {
+            return new PluginConfig
+            {
+                MinEventSeconds = 2,
+                MaxEventSeconds = 10,
+                DiscordWebhookURL = "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks"
+            };
+        }
 
-        private string DiscordWebhookURL = "REDACTED";
+        private PluginConfig config;
 
         #endregion
 
@@ -298,7 +311,7 @@ namespace Oxide.Plugins
             Dictionary<string, string> headers = new Dictionary<string, string>();
             headers.Add("Content-Type", "application/json");
 
-            webrequest.Enqueue(DiscordWebhookURL, payloadJson, (code, response) => DiscordPostCallBack(code, response), this, Core.Libraries.RequestMethod.POST, headers);
+            webrequest.Enqueue(config.DiscordWebhookURL, payloadJson, (code, response) => DiscordPostCallBack(code, response), this, Core.Libraries.RequestMethod.POST, headers);
         }
         private void DiscordPostCallBack(int code, string response)
         {
@@ -330,6 +343,8 @@ namespace Oxide.Plugins
 
         private void Init()
         {
+            config = Config.ReadObject<PluginConfig>();
+
             InitializeDB();
             LoadDBEvents();
         }
@@ -378,6 +393,11 @@ namespace Oxide.Plugins
         private void Loaded()
         {
 
+        }
+
+        protected override void LoadDefaultConfig()
+        {
+            Config.WriteObject(GetDefaultConfig(), true);
         }
 
         object OnPlayerAttack(BasePlayer attacker, HitInfo info)
@@ -448,8 +468,8 @@ namespace Oxide.Plugins
             string DemoFileName = AttackerPlayer.Connection.RecordFilename;
 
             //use a timer to turn the recording off automatically
-            Timer MinEventTimer = timer.Once(MinEventSeconds, () => EndPlayerEvent(EventID));
-            Timer NaxEventTimer = timer.Once(MaxEventSeconds, () => EndPlayerEvent(EventID));
+            Timer MinEventTimer = timer.Once(config.MinEventSeconds, () => EndPlayerEvent(EventID));
+            Timer NaxEventTimer = timer.Once(config.MaxEventSeconds, () => EndPlayerEvent(EventID));
 
             PlayerEvent NewEvent = new PlayerEvent(EventID, AttackerPlayer, VictimPlayer, DemoFileName, MinEventTimer, NaxEventTimer);
             PlayerEvents.Add(NewEvent);
