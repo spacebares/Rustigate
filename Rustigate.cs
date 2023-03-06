@@ -36,6 +36,15 @@ namespace Oxide.Plugins
 
         private Int32 NextEventID = 0;
 
+        ///we keep these in memory to avoid having to waste cpu talking with sqlite
+        ///todo: this is for sure faster, but is it neccessary? its for sure more memory intensive
+        private List<PlayerEvent> PlayerEvents = new List<PlayerEvent>();
+        private Dictionary<ulong, Int32> PlayerActiveEventID = new Dictionary<ulong, Int32>();
+
+        ///again is this neccessary? sql select magic can do this as well, these are only here for caching / speedup
+        //this contains all the events a player has been involved with
+        private Dictionary<ulong, List<Int32>> EventPlayers = new Dictionary<ulong, List<Int32>>();
+
         #region Config
 
         private class PluginConfig
@@ -63,15 +72,6 @@ namespace Oxide.Plugins
         private PluginConfig config;
 
         #endregion
-
-        ///we keep these in memory to avoid having to waste cpu talking with sqlite
-        ///todo: this is for sure faster, but is it neccessary? its for sure more memory intensive
-        private List<PlayerEvent> PlayerEvents = new List<PlayerEvent>();
-        private Dictionary<ulong, Int32> PlayerActiveEventID = new Dictionary<ulong, Int32>();
-
-        ///again is this neccessary? sql select magic can do this as well, these are only here for caching / speedup
-        //this contains all the events a player has been involved with
-        private Dictionary<ulong, List<Int32>> EventPlayers = new Dictionary<ulong, List<Int32>>();
 
         #region Classes
 
@@ -308,6 +308,12 @@ namespace Oxide.Plugins
 
         private void PostDiscordJson(string payloadJson)
         {
+            if(config.DiscordWebhookURL == "" || config.DiscordWebhookURL == "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks")
+            {
+                //dont print out an error, chances are the admin doesn't want to use discord
+                return;
+            }
+
             Dictionary<string, string> headers = new Dictionary<string, string>();
             headers.Add("Content-Type", "application/json");
 
