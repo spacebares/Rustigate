@@ -26,6 +26,7 @@ using Random = Oxide.Core.Random;
 //therfor at somepoint the demofiles need to be in a YYYY/MM/DD folder structure
 //this way admin has an easier time pruning old data by just using host filesystem.
 //afterwards its up to the plugin during startup to recognize these files are missing and remove events from DB
+//  - it seems like automatic event pruning and discord file upload can be done threw an oxide extension?
 
 namespace Oxide.Plugins
 {
@@ -318,10 +319,31 @@ namespace Oxide.Plugins
 
         #region DiscordAPI
 
+        class DiscordFooter
+        {
+            [JsonProperty("text")]
+            public string Text { get; set; }
+        }
+
+        class DiscordEmbed
+        {
+            [JsonProperty("title")]
+            public string Title { get; set; }
+
+            [JsonProperty("description")]
+            public string Description { get; set; }
+
+            [JsonProperty("footer")]
+            public DiscordFooter Footer { get; set; }
+        }
+
         class DiscordMessage
         {
             [JsonProperty("content")]
-            public string MessageText { get; set; }
+            public string Content { get; set; }
+
+            [JsonProperty("embeds")]
+            public List<DiscordEmbed> Embeds { get; set; }
         }
 
         private void PostDiscordJson(string payloadJson)
@@ -345,19 +367,37 @@ namespace Oxide.Plugins
             }
         }
 
-        private void SendDiscordMessage(string message)
+        private void SendDiscordMessage(string content, string EmbedTitle, string EmbedDescription)
         {
+#if DEBUGMODE
+            string ServerIP = "localhost";
+#else
+            string ServerIP = server.Address.MapToIPv4().ToString(); //cause who the fuk uses ipv6 lmao
+#endif
+
+            List<DiscordEmbed> DiscordEmbeds = new List<DiscordEmbed>();
+            DiscordEmbeds.Add(new DiscordEmbed()
+            {
+                Title = EmbedTitle,
+                Description = EmbedDescription,
+                Footer = new DiscordFooter()
+                {
+                    Text = $"from server: {ServerIP}"
+                }
+            });
+
             string payloadJson = JsonConvert.SerializeObject(new DiscordMessage()
             {
-                MessageText = message
+                Content = content,
+                Embeds = DiscordEmbeds,
             });
 
             PostDiscordJson(payloadJson);
         }
 
-        #endregion
+#endregion
 
-        #region Hooks
+#region Hooks
 
         private void Init()
         {
@@ -406,7 +446,7 @@ namespace Oxide.Plugins
             var BotTeam = RelationshipManager.ServerInstance.CreateTeam();
             for (int i = 0; i < 5; i++)
             {
-                BaseEntity baseEntity = GameManager.server.CreateEntity("assets/prefabs/player/player.prefab", new Vector3(78.3f, 15.0f, -187.8f));
+                BaseEntity baseEntity = GameManager.server.CreateEntity("assets/prefabs/player/player.prefab", new Vector3(78.3f + (i*1.25f), 15.0f + (i * 1.25f), -187.8f + (i*1.25f)));
                 if (baseEntity != null)
                 {
                     baseEntity.Spawn();
@@ -418,7 +458,7 @@ namespace Oxide.Plugins
 
             foreach (var player in BasePlayer.activePlayerList)
             {
-                player.IPlayer.Teleport(new GenericPosition(78.3f, 15.0f, -187.8f));
+                //player.IPlayer.Teleport(new GenericPosition(78.3f, 15.0f, -187.8f));
             }
 
             DebugSay("loaded");
@@ -476,8 +516,9 @@ namespace Oxide.Plugins
             there are plenty of other report plugins that will handle normal reports threw discord. we only care about demos.
             */
 
-            string msg = $"{reporter.displayName} reported {targetName}[{targetId}] for {subject}[{message}].\n";
-            DebugSay($"got a report from {reporter.displayName}!");
+            string ReportMSG = $"{reporter.displayName} reported {targetName}[{targetId}] for {subject}[{message}].\n";
+            string EmbedTitle = "";
+            string EmbedDescription = "";
 
             ulong TargetID = Convert.ToUInt64(targetId); 
             if(TargetID == 0)
@@ -496,8 +537,8 @@ namespace Oxide.Plugins
                  * this should help filter out mass reports from unrelated players eg. calling someone out in chat*/
                 if (IsPlayerTeamedWith(reporter, FoundPlayerEvent.EventVictims.Keys.ToList()))
                 {
-                    msg += $"The event is currently active, a demofile will be created at {FoundPlayerEvent.DemoFilename} within {config.MinEventSeconds}-{config.MaxEventSeconds} seconds.";
-                    SendDiscordMessage(msg);
+                    EmbedTitle = $"This report is part of an in-progress recording. A demofile will be created at {FoundPlayerEvent.DemoFilename} within {config.MinEventSeconds}-{config.MaxEventSeconds} seconds.";
+                    SendDiscordMessage(ReportMSG, EmbedTitle, "");
 
                     //todo: remember inprogress events that had reports in them, so when completed we notify again?
                     //        a. have to remember anyway to prevent mass spam on the same player, for the same event(s)
@@ -513,12 +554,42 @@ namespace Oxide.Plugins
              * that contain the target as the Attacker, and make sure the reporter is one of the victims
              * we should return _all_ events that have not been posted to discord related to attacker / victims 
              * depending on a number of factors this could be expensive on CPU, im prob wrong on how expensive it might be*/
-            //todo
+
+            /*the events towards the end would be the most recent.. 
+             * lets stop at say 1 hour timespan? what player would wait that long to report someone? lmao*/
+            DateTime CurrentTime = DateTime.Now;
+            DateTime OneHourAgo = CurrentTime.AddHours(-1);
+            bool bFoundValidEvent = true;
+            EmbedTitle = "This report has the following related demofiles and may span multiple recording events:\n";
+            for (int i = PlayerEvents.Count - 1; i >= 0; i--)
+            {
+                PlayerEvent playerEvent= PlayerEvents[i];
+                if (playerEvent.EventTime < OneHourAgo)
+                {
+                    break;
+                }
+
+                //this event's attacker is the player who is being reported
+                if(playerEvent.AttackerID == TargetID)
+                {
+                    //the one doing the reporting needs to be, or be teamed, with one of the victims
+                    if(IsPlayerTeamedWith(reporter, playerEvent.EventVictims.Keys.ToList()))
+                    {
+                        EmbedDescription += $"{playerEvent.DemoFilename}\n";
+                        bFoundValidEvent = true;
+                    }
+                }
+            }
+
+            if(bFoundValidEvent)
+            {
+                SendDiscordMessage(ReportMSG, EmbedTitle, EmbedDescription);
+            }
         }
 
-        #endregion
+#endregion
 
-        #region Rustigate
+#region Rustigate
         private void DebugSay(string message)
         {
 #if DEBUGMODE
@@ -676,6 +747,6 @@ namespace Oxide.Plugins
             PlayerEvents.RemoveAt(FoundIDX);
         }
 
-        #endregion
+#endregion
     }
 }
