@@ -69,13 +69,14 @@ namespace Oxide.Plugins
             public string DiscordWebhookURL;
         }
 
+
         private PluginConfig GetDefaultConfig()
         {
             return new PluginConfig
             {
-                MinEventSeconds = 2,
-                MaxEventSeconds = 10,
-                DiscordWebhookURL = "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks"
+                MinEventSeconds = 30,
+                MaxEventSeconds = 300,
+                DiscordWebhookURL = ""
             };
         }
 
