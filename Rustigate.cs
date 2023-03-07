@@ -1,24 +1,13 @@
 ﻿#define DEBUGMODE //this should always remain commented unless you are working on the plugin
 
 using Oxide.Core.Libraries.Covalence;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-using UnityEngine.UIElements;
-using System;
-using System.Collections.Generic;
-using ProtoBuf;
-using Oxide.Core.Plugins;
 using Oxide.Core;
-using System.Linq;
 using UnityEngine;
 using Oxide.Core.Database;
-using System.Text;
-using Facepunch.Extend;
-using MySql.Data.MySqlClient;
-using static Facepunch.Tick.Entry;
 using Newtonsoft.Json;
-using System.IO;
-using Random = Oxide.Core.Random;
+using System.Collections.Generic;
+using System;
+using System.Linq;
 
 //todo: this plugin is going to run into disk space issues due to all the demo files:
 //1. oxide currently has no way of knowing how much diskspace is free on the host
