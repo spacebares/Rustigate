@@ -40,6 +40,9 @@ namespace Oxide.Plugins
         //events that have been reported by players (F7 Report), ignored for future discord reports
         private HashSet<Int32> ReportedEvents = new HashSet<Int32>();
 
+        //events that are waiting to complete before being reported
+        private HashSet<Int32> DelayedReportEvents = new HashSet<Int32>();
+
 #if DEBUGMODE
         private List<BasePlayer> Bots = new List<BasePlayer>();
 #endif
@@ -376,6 +379,109 @@ namespace Oxide.Plugins
             }
         }
 
+        private void PrepareDiscordReport(ulong ReporterID, string ReporterName, string TargetName, string TargetID, string ReportSubject, string ReportMessage)
+        {
+            /* For this plugin's reports, the admin only wants to know two things: 
+               - is there a demofile related to a report
+               - and where is that demofile located.
+            our discord report should contain these, and hopefully todo: a convenient download link as well (this requires an oxide.Ext)
+            there are plenty of other report plugins that will handle normal reports threw discord. we only care about demos.
+            */
+
+            ulong _TargetID = Convert.ToUInt64(TargetID);
+
+            string ReportMSG = "";
+            string EmbedTitle = $"**{TargetName}**[_{_TargetID}_] was reported by _{ReporterName}_ for {ReportSubject}: {ReportMessage}\n";
+            string EmbedDescription = "";
+
+
+            if (_TargetID == 0)
+            {
+                //bots dont seem to have a targetId
+                return;
+            }
+
+            //active events dont have a usuable demofile yet.. delay the report of it
+            if (PlayerActiveEventID.ContainsKey(_TargetID))
+            {
+                PlayerEvent FoundPlayerEvent = PlayerEvents[PlayerActiveEventID[_TargetID]]; ///this should always succeed
+
+                if (IsPlayerTeamedWith(ReporterID, FoundPlayerEvent.EventVictims.Keys.ToList()))
+                {
+                    if (DelayedReportEvents.Add(FoundPlayerEvent.EventID))
+                    {
+                        float MaxEventTime = FoundPlayerEvent.MaxEventTimer.Delay + 1.0f;
+                        Timer _timer = timer.Once(MaxEventTime, () => PrepareDiscordReport(ReporterID, ReporterName, TargetName, TargetID, ReportSubject, ReportMessage));
+
+                        Puts($"delaying {FoundPlayerEvent.EventID} for {MaxEventTime}seconds");
+                        ///dont return, otherwise if this player is constantly fighting we will never report something
+                        //return;
+                    }
+                }
+            }
+
+            /*there is a chance the victim(s) have won the battle or are retreating 
+             * and do not have time to send in a report for an active event.
+             *
+             * sadly this means once a report comes in, we need to check all events (within reasonable timespan) 
+             * that contain the target as the Attacker, and make sure the reporter is one of the victims
+             * we should return _all_ events that have not been posted to discord related to attacker / victims 
+             * depending on a number of factors this could be expensive on CPU, im prob wrong on how expensive it might be*/
+
+            /*the events towards the end would be the most recent.. 
+             * lets stop at say 1 hour timespan? what player would wait that long to report someone? lmao*/
+            DateTime CurrentTime = DateTime.Now;
+            DateTime OneHourAgo = CurrentTime.AddHours(-1);
+            bool bFoundValidEvent = false;
+            List<string> VictimNames = new List<string>();
+            for (int i = PlayerEvents.Count - 1; i >= 0; i--)
+            {
+                PlayerEvent playerEvent = PlayerEvents[i];
+
+                if(PlayerActiveEventID.ContainsKey(playerEvent.AttackerID))
+                {
+                    continue;
+                }
+
+                if (ReportedEvents.Contains(playerEvent.EventID))
+                {
+                    continue;
+                }
+
+                if (playerEvent.EventTime < OneHourAgo)
+                {
+                    break;
+                }
+
+                //this event's attacker is the player who is being reported
+                if (playerEvent.AttackerID == _TargetID)
+                {
+                    //the one doing the reporting needs to be, or be teamed, with one of the victims
+                    if (IsPlayerTeamedWith(ReporterID, playerEvent.EventVictims.Keys.ToList()))
+                    {
+                        EmbedDescription += $"{playerEvent.DemoFilename} [id:{playerEvent.EventID}]\n";
+                        ReportedEvents.Add(playerEvent.EventID);
+
+                        foreach (var EventVictimInfo in playerEvent.EventVictims.Values)
+                        {
+                            string EventVictimName = EventVictimInfo.PlayerName;
+                            if (!VictimNames.Contains(EventVictimName))
+                            {
+                                VictimNames.Add(EventVictimName);
+                            }
+                        }
+
+                        bFoundValidEvent = true;
+                    }
+                }
+            }
+
+            if (bFoundValidEvent)
+            {
+                SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription, VictimNames);
+            }
+        }
+
         private void SendDiscordReport(string content, string EmbedTitle, string EmbedDescription, List<string> VictimNames)
         {
 #if DEBUGMODE
@@ -412,11 +518,6 @@ namespace Oxide.Plugins
             });
 
             PostDiscordJson(payloadJson);
-        }
-
-        private void ReportEventToDiscord(BasePlayer temp)
-        {
-
         }
 
 #endregion
@@ -533,104 +634,11 @@ namespace Oxide.Plugins
 
         void OnPlayerReported(BasePlayer reporter, string targetName, string targetId, string subject, string message, string type)
         {
-            /* For this plugin's reports, the admin only wants to know two things: 
-               - is there a demofile related to a report
-               - and where is that demofile located.
-            our discord report should contain these, and hopefully todo: a convenient download link as well (this requires an oxide.Ext)
-            there are plenty of other report plugins that will handle normal reports threw discord. we only care about demos.
-            */
+            //baseplayer Reporter can disconnect from server at anytime, this is why we grab name&id
+            ulong ReporterID = reporter.userID;
+            string ReporterName = reporter.displayName;
 
-            string ReportMSG = "";
-            string EmbedTitle = $"**{targetName}**[_{targetId}_] was reported by _{reporter.displayName}_ for {subject}: {message}\n";
-            string EmbedDescription = "";
-
-            ulong TargetID = Convert.ToUInt64(targetId); 
-            if(TargetID == 0)
-            {
-                //bots dont seem to have a targetId
-                return;
-            }
-
-            /* check and see if the target has an active event, we cant return early here-
-             * -because there could be previously completed events from this same player that are of relevance*/
-            if (PlayerActiveEventID.ContainsKey(TargetID))
-            {
-                PlayerEvent FoundPlayerEvent = PlayerEvents[PlayerActiveEventID[TargetID]]; ///this should always succeed
-
-                if (!ReportedEvents.Contains(FoundPlayerEvent.EventID))
-                {
-                    /* the reporter must be involved with the attacker in an event
-                     * either by being the victim or on a team with any of the victims 
-                     * this should help filter out mass reports from unrelated players eg. calling someone out in chat*/
-                    if (IsPlayerTeamedWith(reporter, FoundPlayerEvent.EventVictims.Keys.ToList()))
-                    {
-                        ReportedEvents.Add(FoundPlayerEvent.EventID);
-
-                        EmbedDescription = $"This report is part of an in-progress recording. A demofile will be created at {FoundPlayerEvent.DemoFilename} within {config.MinEventSeconds}-{config.MaxEventSeconds} seconds.";
-                        //SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription);
-
-                        //todo: remember inprogress events that had reports in them, so when completed we notify again?
-                        //        a. have to remember anyway to prevent mass spam on the same player, for the same event(s)
-                        //todo: or should we even notify about inprogress events? maybe just when they complete ???
-                    }
-                }
-            }
-
-            /*there is a chance the victim(s) have won the battle or are retreating 
-             * and do not have time to send in a report for an active event.
-             *
-             * sadly this means once a report comes in, we need to check all events (within reasonable timespan) 
-             * that contain the target as the Attacker, and make sure the reporter is one of the victims
-             * we should return _all_ events that have not been posted to discord related to attacker / victims 
-             * depending on a number of factors this could be expensive on CPU, im prob wrong on how expensive it might be*/
-
-            /*the events towards the end would be the most recent.. 
-             * lets stop at say 1 hour timespan? what player would wait that long to report someone? lmao*/
-            DateTime CurrentTime = DateTime.Now;
-            DateTime OneHourAgo = CurrentTime.AddHours(-1);
-            bool bFoundValidEvent = false;
-            List<string> VictimNames = new List<string>();
-            for (int i = PlayerEvents.Count - 1; i >= 0; i--)
-            {
-                PlayerEvent playerEvent = PlayerEvents[i];
-
-                if(ReportedEvents.Contains(playerEvent.EventID))
-                {
-                    continue;
-                }
-
-                if (playerEvent.EventTime < OneHourAgo)
-                {
-                    break;
-                }
-
-                //this event's attacker is the player who is being reported
-                if(playerEvent.AttackerID == TargetID)
-                {
-                    //the one doing the reporting needs to be, or be teamed, with one of the victims
-                    if(IsPlayerTeamedWith(reporter, playerEvent.EventVictims.Keys.ToList()))
-                    {
-                        EmbedDescription += $"{playerEvent.DemoFilename}\n";
-                        ReportedEvents.Add(playerEvent.EventID);
-
-                        foreach (var EventVictimInfo in playerEvent.EventVictims.Values)
-                        {
-                            string EventVictimName = EventVictimInfo.PlayerName;
-                            if (!VictimNames.Contains(EventVictimName))
-                            {
-                                VictimNames.Add(EventVictimName);
-                            }
-                        }
-
-                        bFoundValidEvent = true;
-                    }
-                }
-            }
-
-            if(bFoundValidEvent)
-            {
-                SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription, VictimNames);
-            }
+            PrepareDiscordReport(ReporterID, ReporterName, targetName, targetId, subject, message);
         }
 
         #endregion
@@ -642,6 +650,25 @@ namespace Oxide.Plugins
 #if DEBUGMODE
             server.Command("say", (message));
 #endif
+        }
+
+        private BasePlayer FindPlayerById(ulong PlayerID)
+        {
+            BasePlayer InstigatorPlayer = Oxide.Game.Rust.RustCore.FindPlayerById(PlayerID);
+#if DEBUGMODE
+            if (InstigatorPlayer == null)
+            {
+                foreach (var Bot in Bots)
+                {
+                    if (Bot.userID == PlayerID)
+                    {
+                        InstigatorPlayer = Bot;
+                        break;
+                    }
+                }
+            }
+#endif
+            return InstigatorPlayer;
         }
 
         private bool IsPlayerTeamedWith(BasePlayer InstigatorPlayer, BasePlayer TargetPlayer)
@@ -656,16 +683,17 @@ namespace Oxide.Plugins
                 || InstigatorPlayer.Team != null ? InstigatorPlayer.Team.members.Contains(TargetPlayerID) : false;
         }
 
-        private bool IsPlayerTeamedWith(BasePlayer InstigatorPlayer, List<ulong> TargetPlayerIDs)
+        private bool IsPlayerTeamedWith(ulong InstigatorPlayerID, List<ulong> TargetPlayerIDs)
         {
             foreach (var TargetPlayerID in TargetPlayerIDs)
             {
-                if (InstigatorPlayer.userID == TargetPlayerID)
+                if (InstigatorPlayerID == TargetPlayerID)
                 {
                     return true;
                 }
 
-                if (InstigatorPlayer.Team != null && InstigatorPlayer.Team.members.Contains(TargetPlayerID))
+                BasePlayer InstigatorPlayer = FindPlayerById(InstigatorPlayerID);
+                if (InstigatorPlayer?.Team != null && InstigatorPlayer.Team.members.Contains(TargetPlayerID))
                 {
                     return true;
                 }
@@ -776,6 +804,7 @@ namespace Oxide.Plugins
             }
 
             PlayerActiveEventID.Remove(playerEvent.AttackerID);
+            DelayedReportEvents.Remove(EventID);
             DebugSay("event " + EventID + " for " + playerEvent.AttackerName + " has ended");
         }
 
