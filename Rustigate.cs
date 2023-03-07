@@ -48,6 +48,9 @@ namespace Oxide.Plugins
         //this contains all the events a player has been involved with
         private Dictionary<ulong, List<Int32>> EventPlayers = new Dictionary<ulong, List<Int32>>();
 
+        //events that have been reported by players (F7 Report), ignored for future discord reports
+        private HashSet<Int32> ReportedEvents = new HashSet<Int32>();
+
 #if DEBUGMODE
         private List<BasePlayer> Bots = new List<BasePlayer>();
 #endif
@@ -313,6 +316,7 @@ namespace Oxide.Plugins
             }
 
             OnPlayerReported(BotReporter, LocalPlayer.displayName, LocalPlayer.UserIDString, "hak", "hes just fuking hak from /testselfreport", "cheat");
+            player.Reply("sent");
         }
 #endif
         #endregion
@@ -325,6 +329,15 @@ namespace Oxide.Plugins
             public string Text { get; set; }
         }
 
+        class DiscordField
+        {
+            [JsonProperty("name")]
+            public string Name { get; set; }
+
+            [JsonProperty("value")]
+            public string Value { get; set; }
+        }
+
         class DiscordEmbed
         {
             [JsonProperty("title")]
@@ -332,6 +345,12 @@ namespace Oxide.Plugins
 
             [JsonProperty("description")]
             public string Description { get; set; }
+
+            [JsonProperty("color")]
+            public string Color { get; set; }
+
+            [JsonProperty("fields")]
+            public List<DiscordField> Fields { get; set; }
 
             [JsonProperty("footer")]
             public DiscordFooter Footer { get; set; }
@@ -361,13 +380,13 @@ namespace Oxide.Plugins
         }
         private void DiscordPostCallBack(int code, string response)
         {
-            if (code != 200 || code != 204)
+            if (code != 200 && code != 204)
             {
                 PrintWarning(String.Format("Discord Api responded with {0}: {1}", code, response));
             }
         }
 
-        private void SendDiscordMessage(string content, string EmbedTitle, string EmbedDescription)
+        private void SendDiscordReport(string content, string EmbedTitle, string EmbedDescription, List<DiscordField> Fields = null)
         {
 #if DEBUGMODE
             string ServerIP = "localhost";
@@ -380,6 +399,7 @@ namespace Oxide.Plugins
             {
                 Title = EmbedTitle,
                 Description = EmbedDescription,
+                Color = "16711680",
                 Footer = new DiscordFooter()
                 {
                     Text = $"from server: {ServerIP}"
@@ -389,15 +409,20 @@ namespace Oxide.Plugins
             string payloadJson = JsonConvert.SerializeObject(new DiscordMessage()
             {
                 Content = content,
-                Embeds = DiscordEmbeds,
+                Embeds = DiscordEmbeds
             });
 
             PostDiscordJson(payloadJson);
         }
 
+        private void ReportEventToDiscord(BasePlayer temp)
+        {
+
+        }
+
 #endregion
 
-#region Hooks
+        #region Hooks
 
         private void Init()
         {
@@ -462,7 +487,7 @@ namespace Oxide.Plugins
             }
 
             DebugSay("loaded");
-#endif
+        #endif
         }
 
         private void Loaded()
@@ -516,8 +541,8 @@ namespace Oxide.Plugins
             there are plenty of other report plugins that will handle normal reports threw discord. we only care about demos.
             */
 
-            string ReportMSG = $"{reporter.displayName} reported {targetName}[{targetId}] for {subject}[{message}].\n";
-            string EmbedTitle = "";
+            string ReportMSG = "";
+            string EmbedTitle = $"**{targetName}**[_{targetId}_] was reported by _{reporter.displayName}_ for {subject}: {message}\n";
             string EmbedDescription = "";
 
             ulong TargetID = Convert.ToUInt64(targetId); 
@@ -527,23 +552,28 @@ namespace Oxide.Plugins
                 return;
             }
 
-            /* check and see if the target has an active event, we could complete this hook early for CPU */
+            /* check and see if the target has an active event, we cant return early here-
+             * -because there could be previously completed events from this same player that are of relevance*/
             if (PlayerActiveEventID.ContainsKey(TargetID))
             {
                 PlayerEvent FoundPlayerEvent = PlayerEvents[PlayerActiveEventID[TargetID]]; ///this should always succeed
 
-                /* the reporter must be involved with the attacker in an event
-                 * either by being the victim or on a team with any of the victims 
-                 * this should help filter out mass reports from unrelated players eg. calling someone out in chat*/
-                if (IsPlayerTeamedWith(reporter, FoundPlayerEvent.EventVictims.Keys.ToList()))
+                if (!ReportedEvents.Contains(FoundPlayerEvent.EventID))
                 {
-                    EmbedTitle = $"This report is part of an in-progress recording. A demofile will be created at {FoundPlayerEvent.DemoFilename} within {config.MinEventSeconds}-{config.MaxEventSeconds} seconds.";
-                    SendDiscordMessage(ReportMSG, EmbedTitle, "");
+                    /* the reporter must be involved with the attacker in an event
+                     * either by being the victim or on a team with any of the victims 
+                     * this should help filter out mass reports from unrelated players eg. calling someone out in chat*/
+                    if (IsPlayerTeamedWith(reporter, FoundPlayerEvent.EventVictims.Keys.ToList()))
+                    {
+                        ReportedEvents.Add(FoundPlayerEvent.EventID);
 
-                    //todo: remember inprogress events that had reports in them, so when completed we notify again?
-                    //        a. have to remember anyway to prevent mass spam on the same player, for the same event(s)
-                    //todo: or should we even notify about inprogress events? maybe just when they complete ???
-                    return;
+                        EmbedDescription = $"This report is part of an in-progress recording. A demofile will be created at {FoundPlayerEvent.DemoFilename} within {config.MinEventSeconds}-{config.MaxEventSeconds} seconds.";
+                        SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription);
+
+                        //todo: remember inprogress events that had reports in them, so when completed we notify again?
+                        //        a. have to remember anyway to prevent mass spam on the same player, for the same event(s)
+                        //todo: or should we even notify about inprogress events? maybe just when they complete ???
+                    }
                 }
             }
 
@@ -559,11 +589,16 @@ namespace Oxide.Plugins
              * lets stop at say 1 hour timespan? what player would wait that long to report someone? lmao*/
             DateTime CurrentTime = DateTime.Now;
             DateTime OneHourAgo = CurrentTime.AddHours(-1);
-            bool bFoundValidEvent = true;
-            EmbedTitle = "This report has the following related demofiles and may span multiple recording events:\n";
+            bool bFoundValidEvent = false;
             for (int i = PlayerEvents.Count - 1; i >= 0; i--)
             {
-                PlayerEvent playerEvent= PlayerEvents[i];
+                PlayerEvent playerEvent = PlayerEvents[i];
+
+                if(ReportedEvents.Contains(playerEvent.EventID))
+                {
+                    continue;
+                }
+
                 if (playerEvent.EventTime < OneHourAgo)
                 {
                     break;
@@ -576,6 +611,7 @@ namespace Oxide.Plugins
                     if(IsPlayerTeamedWith(reporter, playerEvent.EventVictims.Keys.ToList()))
                     {
                         EmbedDescription += $"{playerEvent.DemoFilename}\n";
+                        ReportedEvents.Add(playerEvent.EventID);
                         bFoundValidEvent = true;
                     }
                 }
@@ -583,13 +619,14 @@ namespace Oxide.Plugins
 
             if(bFoundValidEvent)
             {
-                SendDiscordMessage(ReportMSG, EmbedTitle, EmbedDescription);
+                SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription);
             }
         }
 
-#endregion
+        #endregion
 
-#region Rustigate
+        #region Rustigate
+
         private void DebugSay(string message)
         {
 #if DEBUGMODE
@@ -747,6 +784,6 @@ namespace Oxide.Plugins
             PlayerEvents.RemoveAt(FoundIDX);
         }
 
-#endregion
+        #endregion
     }
 }
