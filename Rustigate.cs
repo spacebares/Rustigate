@@ -386,7 +386,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void SendDiscordReport(string content, string EmbedTitle, string EmbedDescription, List<DiscordField> Fields = null)
+        private void SendDiscordReport(string content, string EmbedTitle, string EmbedDescription, List<string> VictimNames)
         {
 #if DEBUGMODE
             string ServerIP = "localhost";
@@ -394,12 +394,21 @@ namespace Oxide.Plugins
             string ServerIP = server.Address.MapToIPv4().ToString(); //cause who the fuk uses ipv6 lmao
 #endif
 
+            string Victims = String.Join(", ", VictimNames);
+            List<DiscordField> Fields = new List<DiscordField>();
+            Fields.Add(new DiscordField()
+            {
+                Name = "Victims:",
+                Value = Victims
+            });
+
             List<DiscordEmbed> DiscordEmbeds = new List<DiscordEmbed>();
             DiscordEmbeds.Add(new DiscordEmbed()
             {
                 Title = EmbedTitle,
                 Description = EmbedDescription,
                 Color = "16711680",
+                Fields = Fields,
                 Footer = new DiscordFooter()
                 {
                     Text = $"from server: {ServerIP}"
@@ -568,7 +577,7 @@ namespace Oxide.Plugins
                         ReportedEvents.Add(FoundPlayerEvent.EventID);
 
                         EmbedDescription = $"This report is part of an in-progress recording. A demofile will be created at {FoundPlayerEvent.DemoFilename} within {config.MinEventSeconds}-{config.MaxEventSeconds} seconds.";
-                        SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription);
+                        //SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription);
 
                         //todo: remember inprogress events that had reports in them, so when completed we notify again?
                         //        a. have to remember anyway to prevent mass spam on the same player, for the same event(s)
@@ -590,6 +599,7 @@ namespace Oxide.Plugins
             DateTime CurrentTime = DateTime.Now;
             DateTime OneHourAgo = CurrentTime.AddHours(-1);
             bool bFoundValidEvent = false;
+            List<string> VictimNames = new List<string>();
             for (int i = PlayerEvents.Count - 1; i >= 0; i--)
             {
                 PlayerEvent playerEvent = PlayerEvents[i];
@@ -612,6 +622,16 @@ namespace Oxide.Plugins
                     {
                         EmbedDescription += $"{playerEvent.DemoFilename}\n";
                         ReportedEvents.Add(playerEvent.EventID);
+
+                        foreach (var EventVictimInfo in playerEvent.EventVictims.Values)
+                        {
+                            string EventVictimName = EventVictimInfo.PlayerName;
+                            if (!VictimNames.Contains(EventVictimName))
+                            {
+                                VictimNames.Add(EventVictimName);
+                            }
+                        }
+
                         bFoundValidEvent = true;
                     }
                 }
@@ -619,7 +639,7 @@ namespace Oxide.Plugins
 
             if(bFoundValidEvent)
             {
-                SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription);
+                SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription, VictimNames);
             }
         }
 
