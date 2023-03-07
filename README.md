@@ -2,7 +2,7 @@
 
  ![](https://img.shields.io/github/release/Rustigate/editor.md.svg) 
 ## Why Rustigate?
-Rustigate **automatically** starts [demo-recording](http://https://wiki.facepunch.com/rust/Demos "demo-recording") players who attack other players, keeping track of who this player has attacked and the location of the demo files. This builds an archive of demofootage for later review.
+Rustigate **automatically** starts [demo-recording](https://wiki.facepunch.com/rust/Demos "demo-recording") players who attack other players, keeping track of who this player has attacked and the location of the demo files. This builds an archive of demofootage for later review.
 
 Whenever this player is reported, the demofiles related to their attacks on the player sending in the report is sent to a [Discord Webhook](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks "Discord Webhook"). 
 *Only victims or their teammates of this event will trigger a Discord message. This saves on bogus reports from unrelated players, eg. mass reports from calling them out in chat.*
@@ -38,10 +38,26 @@ Now instead of spending hours spectating a player to figure out if they are hack
 4. Paste in your [Discord Webhook](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks "Discord Webhook") URL inside the quotes.
 5. run `oxide.reload Rustigate` or just Restart the server.
 
-#Configuration
+# Configuration
 *Default settings should be ok, to explain MinEventSeconds and MaxEventSeconds:*
 Once a player attacks another player, a PlayerEvent is created and a demo starts recording the attacker's POV. The event ends after `MinEventSeconds`, however if the player keeps attacking players they extend the event for another `MinEventSeconds`. If the event takes too long, after `MaxEventSeconds` the event is completed. 
 If `MinEventSeconds` is too small, you can miss alot of information after a player is attacked. And if `MaxEventSeconds` is too large then demofiles may contain alot of useless information like them running back to base and afking.
 
-#Contributing
+# Usage
+1. Check out the discord message from a report
+2. Access the server's filesystem, and download the file(s) in the report to your computer.
+3. **Disconnect from the server or demo playback wont work.**
+4. Click on the demo button in your Rust Game's main menu.
+[![demobutton](https://i.imgur.com/dF3cknZ.png "demobutton")](https://i.imgur.com/dF3cknZ.png "demobutton")
+5. Click the button to open up the demos folder:
+[![demosfolder](https://i.imgur.com/hV6siWg.png "demosfolder")](https://i.imgur.com/hV6siWg.png "demosfolder")
+6. Move the demos you downloaded into the folder that the button opens
+7. Click on the refresh button  
+[![refreshbutton](https://i.imgur.com/WEmYfQz.png "refreshbutton")](https://i.imgur.com/WEmYfQz.png "refreshbutton")
+8. Sort by date so the most recent demos are up top
+[![recentbutton](https://i.imgur.com/l5fmvLG.png "recentbutton")](https://i.imgur.com/l5fmvLG.png "recentbutton")
+9. Pick a demo and hit play
+10. Make sure you type in `disconnect` in console if you want to watch a different demo, current bug in demo system at the moment...
+
+# Contributing
 - make code, make pull request, report bugs. If you want to steal or remake plugin somewhere else thats fine, we need to arm our admins with strong tools to defeat all hacker. Which means **this plugin will remain free forever.**
