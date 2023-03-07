@@ -22,7 +22,7 @@ Now instead of spending hours spectating a player to figure out if they are hack
 #### Limitations:
 - Most of the demos are going to start off with a player already getting shot at. Some of these kinds of demos may not reveal much. However against say a team of 2, since the demo has already started recording for the 1st dead player, it will show much more information of what happened to the 2nd player.
 - Rust demos are currently uncompressed, so **this plugin will use up diskspace**. Automatic pruning of old demos is a planned feature, to limit the diskspace usage of the plugin.
-- Rust demos are written to disk in real-time, this means **Disk performance is very important if there are a large amount of active players fighting in your server**.
+- Rust demos are written to disk once they complete, this means **Disk performance is very important if there are a large amount of active players fighting in your server**.
 
 - Currently **need filesystem access to the server** to download the demofile onto your computer. Demos as fileattachment in the discord messages is a planned feature.
 
