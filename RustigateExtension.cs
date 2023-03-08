@@ -27,7 +27,7 @@ namespace Oxide.Ext.Rustigate
         /// </summary>
         public override VersionNumber Version => new VersionNumber(0, 0, 1);
 
-        public static RustigateDemoExt RustigateDemoManager;
+        public static RustigateDemoExt RustigateDemoExt;
 
         /// <summary>
         /// Initializes a new instance of the MySqlExtension class
@@ -59,7 +59,7 @@ namespace Oxide.Ext.Rustigate
         /// </summary>
         public override void OnModLoad()
         {
-            RustigateDemoManager = new RustigateDemoExt();
+            RustigateDemoExt = new RustigateDemoExt();
         }
 
         /// <summary>
