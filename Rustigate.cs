@@ -2,12 +2,13 @@
 
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core;
-using UnityEngine;
 using Oxide.Core.Database;
 using Newtonsoft.Json;
 using System.Collections.Generic;
 using System;
 using System.Linq;
+using UnityEngine;
+using Oxide.Ext.Rustigate;
 
 //todo: this plugin is going to run into disk space issues due to all the demo files:
 //1. oxide currently has no way of knowing how much diskspace is free on the host
@@ -226,6 +227,15 @@ namespace Oxide.Plugins
                         ulong AttackerPlayerID = Convert.ToUInt64(evententry["AttackerPlayerID"].ToString());
                         string DemoFilename = Convert.ToString(evententry["DemoFilename"]);
 
+                        //events without demo file are orphaned and should be removed
+                        if (!RustigateExtension.RustigateDemoManager.IsDemoOnDisk(DemoFilename))
+                        {
+                            Puts($"{DemoFilename} is missing, deleting orphaned event #{EventID}");
+
+                            DeleteEventFromDB(EventID);
+                            continue;
+                        }
+
                         //the sql query above should have kept the eventids in order...
                         PlayerEvent NewEvent = new PlayerEvent(EventID, EventTime, AttackerPlayerName, AttackerPlayerID, DemoFilename);
                         PlayerEvents.Add(NewEvent);
@@ -267,6 +277,20 @@ namespace Oxide.Plugins
                 });
 
                 Puts("finished LoadDBEvents!");
+            }
+        }
+
+        private void DeleteEventFromDB(Int32 EventID)
+        {
+            {
+                string sqlQuery = "DELETE FROM Events WHERE `EventID` = @0;";
+                Sql sqlCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, EventID);
+                sqlLibrary.ExecuteNonQuery(sqlCommand, sqlConnection);
+            }
+            {
+                string sqlQuery = "DELETE FROM Victims WHERE `EventID` = @0;";
+                Sql sqlCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, EventID);
+                sqlLibrary.ExecuteNonQuery(sqlCommand, sqlConnection);
             }
         }
 
@@ -520,7 +544,7 @@ namespace Oxide.Plugins
             PostDiscordJson(payloadJson);
         }
 
-#endregion
+        #endregion
 
         #region Hooks
 
@@ -580,19 +604,7 @@ namespace Oxide.Plugins
                     BotTeam.AddPlayer(botplayer);
                 }
             }
-
-            foreach (var player in BasePlayer.activePlayerList)
-            {
-                //player.IPlayer.Teleport(new GenericPosition(78.3f, 15.0f, -187.8f));
-            }
-
-            DebugSay("loaded");
-        #endif
-        }
-
-        private void Loaded()
-        {
-
+#endif
         }
 
         protected override void LoadDefaultConfig()
