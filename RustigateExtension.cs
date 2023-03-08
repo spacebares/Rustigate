@@ -20,14 +20,14 @@ namespace Oxide.Ext.Rustigate
         /// <summary>
         /// Gets the author of this extension
         /// </summary>
-        public override string Author => "Spacebares";
+        public override string Author => "https://github.com/spacebares/Rustigate";
 
         /// <summary>
         /// Gets the version of this extension
         /// </summary>
         public override VersionNumber Version => new VersionNumber(0, 0, 1);
 
-        public static RustigateDemoManager RustigateDemoManager;
+        public static RustigateDemoExt RustigateDemoManager;
 
         /// <summary>
         /// Initializes a new instance of the MySqlExtension class
@@ -59,7 +59,7 @@ namespace Oxide.Ext.Rustigate
         /// </summary>
         public override void OnModLoad()
         {
-            RustigateDemoManager = new RustigateDemoManager();
+            RustigateDemoManager = new RustigateDemoExt();
         }
 
         /// <summary>

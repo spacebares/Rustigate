@@ -58,7 +58,7 @@ namespace Oxide.Plugins
             /*regardless of how many times a player attacks others during an event, it will always end after MaxEventSeconds
             this prevents a malicious player from just attacking someone every <5min to delay the saving of a demo for review*/
             public Int32 MaxEventSeconds;
-            //set this to your server's webhook URL that you setup via https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks
+            //see https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks for info
             public string DiscordWebhookURL;
         }
 
@@ -185,20 +185,20 @@ namespace Oxide.Plugins
             //- that has the victim player(s) who sent the report in
             sqlLibrary.ExecuteNonQuery(Sql.Builder.Append(
                 @"CREATE TABLE IF NOT EXISTS `Events` (
-	            `EventID`	INTEGER,
-	            `EventTime`	TEXT,
-	            `AttackerPlayerName`	TEXT,
-	            `AttackerPlayerID`	INTEGER,
-	            `DemoFilename`	TEXT,
-	            PRIMARY KEY(`EventID`)
+                `EventID`	INTEGER,
+                `EventTime`	TEXT,
+                `AttackerPlayerName`	TEXT,
+                `AttackerPlayerID`	INTEGER,
+                `DemoFilename`	TEXT,
+                PRIMARY KEY(`EventID`)
             )"), sqlConnection);
 
             //instead of using string delimeters we store victims like this to save on space & cpu
             sqlLibrary.ExecuteNonQuery(Sql.Builder.Append(
                 @"CREATE TABLE IF NOT EXISTS `Victims` (
-	            `EventID`	INTEGER,
-	            `VictimName`	TEXT,
-	            `VictimID`	INTEGER,
+                `EventID`	INTEGER,
+                `VictimName`	TEXT,
+                `VictimID`	INTEGER,
                 `EventTime` TEXT
             )"), sqlConnection);
         }
@@ -770,7 +770,7 @@ namespace Oxide.Plugins
             return true;
         }
 
-        private void EndPlayerEvent(Int32 EventID)
+        private void EndPlayerEvent(Int32 EventID, bool bSkipDBSave = false)
         {
             PlayerEvent playerEvent;
             if(!FindPlayerEvent(EventID, out playerEvent))
@@ -786,25 +786,12 @@ namespace Oxide.Plugins
             playerEvent.MaxEventTimer.Destroy();
 
             //we save it to DB when the event ends to avoid too many updates during combat
+            if (!bSkipDBSave)
             {
-                string sqlQuery = "INSERT INTO Events (`EventID`, `EventTime`, `AttackerPlayerName`, `AttackerPlayerID`, `DemoFilename`) VALUES (@0, @1, @2, @3, @4);";
-                Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, playerEvent.EventTime, playerEvent.AttackerName, playerEvent.AttackerID, playerEvent.DemoFilename);
-                sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
+                //todo: i want all db stuff in the DB region, make these into functions at some point...
                 {
-                    if (rowsAffected == 0)
-                    {
-                        RaiseError("Could not insert record into DB!");
-                    }
-                });
-            }
-            {
-                foreach (var EventVictim in playerEvent.EventVictims)
-                {
-                    string VictimName = EventVictim.Value.PlayerName;
-                    ulong VictimID = EventVictim.Value.PlayerID;
-                    DateTime EventTime = EventVictim.Value.EventTime;
-                    string sqlQuery = "INSERT INTO Victims (`EventID`, `VictimName`, `VictimID`, `EventTime`) VALUES (@0, @1, @2, @3);";
-                    Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, VictimName, VictimID, EventTime);
+                    string sqlQuery = "INSERT INTO Events (`EventID`, `EventTime`, `AttackerPlayerName`, `AttackerPlayerID`, `DemoFilename`) VALUES (@0, @1, @2, @3, @4);";
+                    Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, playerEvent.EventTime, playerEvent.AttackerName, playerEvent.AttackerID, playerEvent.DemoFilename);
                     sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
                     {
                         if (rowsAffected == 0)
@@ -812,6 +799,23 @@ namespace Oxide.Plugins
                             RaiseError("Could not insert record into DB!");
                         }
                     });
+                }
+                {
+                    foreach (var EventVictim in playerEvent.EventVictims)
+                    {
+                        string VictimName = EventVictim.Value.PlayerName;
+                        ulong VictimID = EventVictim.Value.PlayerID;
+                        DateTime EventTime = EventVictim.Value.EventTime;
+                        string sqlQuery = "INSERT INTO Victims (`EventID`, `VictimName`, `VictimID`, `EventTime`) VALUES (@0, @1, @2, @3);";
+                        Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, VictimName, VictimID, EventTime);
+                        sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
+                        {
+                            if (rowsAffected == 0)
+                            {
+                                RaiseError("Could not insert record into DB!");
+                            }
+                        });
+                    }
                 }
             }
 
@@ -822,15 +826,16 @@ namespace Oxide.Plugins
 
         private void DeletePlayerEvent(Int32 EventID)
         {
-            //i dont like this Find here but the events list can have holes in it as old ones get pruned
-            //cant rely on eventID being the array index... this also means dictionaries are out of the question
+            //i dont like this Find
             int FoundIDX = PlayerEvents.FindIndex(x => x.EventID == EventID);
             if (FoundIDX == -1)
                 return;
 
-            string sqlQuery = "DELETE FROM Events WHERE `EventID` = @0;";
-            Sql deleteCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, EventID);
-            sqlLibrary.ExecuteNonQuery(deleteCommand, sqlConnection);
+            //just in case we are trying to delete an active event make sure the demofile handle is closed properly...
+            EndPlayerEvent(PlayerEvents[FoundIDX].EventID, true);
+
+            DeleteEventFromDB(EventID);
+            RustigateExtension.RustigateDemoManager.DeleteDemoFromDisk(PlayerEvents[FoundIDX].DemoFilename);
 
             PlayerEvents.RemoveAt(FoundIDX);
         }
