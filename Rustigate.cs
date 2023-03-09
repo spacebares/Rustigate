@@ -435,7 +435,8 @@ namespace Oxide.Plugins
             //active events dont have a usuable demofile yet.. delay the report of it
             if (PlayerActiveEventID.ContainsKey(_TargetID))
             {
-                PlayerEvent FoundPlayerEvent = PlayerEvents[PlayerActiveEventID[_TargetID]]; ///this should always succeed
+                PlayerEvent FoundPlayerEvent;
+                FindPlayerEvent(PlayerActiveEventID[_TargetID], out FoundPlayerEvent); ///this should always succeed..
 
                 if (IsPlayerTeamedWith(ReporterID, FoundPlayerEvent.EventVictims.Keys.ToList()))
                 {
@@ -444,7 +445,7 @@ namespace Oxide.Plugins
                         float MaxEventTime = FoundPlayerEvent.MaxEventTimer.Delay + 1.0f;
                         Timer _timer = timer.Once(MaxEventTime, () => PrepareDiscordReport(ReporterID, ReporterName, TargetName, TargetID, ReportSubject, ReportMessage));
 
-                        //Puts($"delaying {FoundPlayerEvent.EventID} for {MaxEventTime}seconds");
+                        DebugSay($"delaying {FoundPlayerEvent.EventID} for {MaxEventTime}seconds");
                         ///dont return, otherwise if this player is constantly fighting we will never report something
                         //return;
                     }
@@ -803,8 +804,6 @@ namespace Oxide.Plugins
             playerEvent.MaxEventTimer.Destroy();
 
             RustigateExtension.RustigateDemoExt.NotifyNewDemoCreated(playerEvent.DemoFilename);
-            long DemoSizee = RustigateExtension.RustigateDemoExt.GetDemoSize(playerEvent.DemoFilename);
-            DebugSay($"{DemoSizee}");
 
             //we save it to DB when the event ends to avoid too many updates during combat
             if (!bSkipDBSave)
@@ -854,8 +853,7 @@ namespace Oxide.Plugins
             //if our demo folder is too big, we need to start deleting events starting with the oldest ones
             long DemoFolderSize = RustigateExtension.RustigateDemoExt.DemoFolderSize;
             long MaxDemoFolderSize = config.MaxDemoFolderSizeMB * 1000000;
-            DebugSay($"DemoFolderSize {DemoFolderSize}");
-            DebugSay($"config.MaxDemoFolderSizeMB {MaxDemoFolderSize}");
+
             if (DemoFolderSize > MaxDemoFolderSize)
             {
                 List<int> IdxToDelete = new List<int>();
