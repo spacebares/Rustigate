@@ -13,15 +13,14 @@ Now instead of spending hours spectating a player to figure out if they are hack
 ## Features
 - Automatic demo recording of players when they attack others.
 - Messages to Discord *(Webhook)* with demofile location when a player is reported.
+- Automatic pruning of old events to limit diskspace usage.
 
 #### Planned Features
-- Automatic pruning of old events *(DLL ext)*
 - Upload of demofile(s) as discord attachment *(DLL ext)*
 - Ingame event browser 
 
 #### Limitations:
 - Most of the demos are going to start off with a player already getting shot at. Some of these kinds of demos may not reveal much. However against say a team of 2, since the demo has already started recording for the 1st dead player, it will show much more information of what happened to the 2nd player.
-- Rust demos are currently uncompressed, so **this plugin will use up diskspace**. Automatic pruning of old demos is a planned feature, to limit the diskspace usage of the plugin.
 - Rust demos are written to disk once they complete, this means **Disk performance is very important if there are a large amount of active players fighting in your server**.
 
 - Currently **need filesystem access to the server** to download the demofile onto your computer. Demos as fileattachment in the discord messages is a planned feature.
@@ -29,7 +28,7 @@ Now instead of spending hours spectating a player to figure out if they are hack
 - This plugin is incompatible with other plugins that record demos of players. Rust only allows a single active recording per player. *(To clarify, 300 players fighting = 300 demos being recorded at once, Two recording plugins would be 600 demos at once, which is not possible with the rust demo system)*
 
 # Requirements:
-- None so far
+- 2GB diskspace for demofiles *(Configurable)*
 
 # Installation:
 1. Copy Rustigate.cs to your servers */oxide/plugins/* directory.
@@ -39,9 +38,13 @@ Now instead of spending hours spectating a player to figure out if they are hack
 5. run `oxide.reload Rustigate` or just Restart the server.
 
 # Configuration
-*Default settings should be ok, to explain MinEventSeconds and MaxEventSeconds:*
+*Default settings should be ok*
+
+**MinEventSeconds and MaxEventSeconds:**
 Once a player attacks another player, a PlayerEvent is created and a demo starts recording the attacker's POV. The event ends after `MinEventSeconds`, however if the player keeps attacking players they extend the event for another `MinEventSeconds`. If the event takes too long, after `MaxEventSeconds` the event is completed. 
 If `MinEventSeconds` is too small, you can miss alot of information after a player is attacked. And if `MaxEventSeconds` is too large then demofiles may contain alot of useless information like them running back to base and afking.
+
+**MaxDemoFolderSizeMB** is used to limit the size of the demo folder. If over this limit, old demos are deleted to maintain a folder size below this.
 
 # Usage
 1. Check out the discord message from a report
