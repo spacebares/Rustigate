@@ -8,27 +8,44 @@ namespace Oxide.Ext.Rustigate
     {
         //demofileLocation looks like: demos/playerSteamID64/demofilename.dem
         private string RootDir = Interface.Oxide.RootDirectory + "/";
+
+        //instead of getting the size of the folder each time a demo is added or deleted
+        //we just incrementally subtract or add based on DeleteDemoFromDisk and NotifyNewDemoCreated calls
+        public long DemoFolderSize;
+
         public RustigateDemoExt()
         {
             
         }
 
-        public bool IsDemoOnDisk(string demofileLocation)
+        public void NotifyNewDemoCreated(string DemofileLocation)
         {
-            return File.Exists(RootDir + demofileLocation);
+            long DemoSize = GetDemoSize(DemofileLocation);
+            DemoFolderSize += DemoSize;
         }
 
-        public void DeleteDemoFromDisk(string demofileLocation)
+        public bool IsDemoOnDisk(string DemofileLocation)
         {
-            if (IsDemoOnDisk(demofileLocation))
+            return File.Exists(RootDir + DemofileLocation);
+        }
+
+        //returns the amount of bytes deleted
+        public long DeleteDemoFromDisk(string DemofileLocation)
+        {
+            if (IsDemoOnDisk(DemofileLocation))
             {
-                File.Delete(RootDir + demofileLocation);
+                long DemoSize = GetDemoSize(DemofileLocation);
+                DemoFolderSize -= DemoSize;
+                File.Delete(RootDir + DemofileLocation);
+                return DemoSize;
             }
+
+            return 0;
         }
 
-        public long GetDemoSize(string demofileLocation)
+        public long GetDemoSize(string DemofileLocation)
         {
-            FileInfo DemoFileInfo = new FileInfo(RootDir + demofileLocation);
+            FileInfo DemoFileInfo = new FileInfo(RootDir + DemofileLocation);
             return DemoFileInfo.Length;
         }
     }

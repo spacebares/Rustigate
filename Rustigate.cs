@@ -60,6 +60,8 @@ namespace Oxide.Plugins
             public Int32 MaxEventSeconds;
             //see https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks for info
             public string DiscordWebhookURL;
+            //if all of our events are larger then this, then we start deleting the oldest events until we are back under
+            public Int32 MaxDemoFolderSizeMB;
         }
 
 
@@ -69,7 +71,8 @@ namespace Oxide.Plugins
             {
                 MinEventSeconds = 30,
                 MaxEventSeconds = 300,
-                DiscordWebhookURL = ""
+                DiscordWebhookURL = "",
+                MaxDemoFolderSizeMB = 2048
             };
         }
 
@@ -116,8 +119,7 @@ namespace Oxide.Plugins
             public Vector3 AttackerInitialPosition;
 
             /*there can be a number of different victims within one demo recording
-             * we track all of them here to make searching for related player vs player events easier
-             */
+             * we track all of them here to make searching for related player vs player events easier */
             public Dictionary<ulong, EventVictimInfo> EventVictims = new Dictionary<ulong, EventVictimInfo>();
 
             public DateTime EventTime;
@@ -206,7 +208,7 @@ namespace Oxide.Plugins
         private void LoadDBEvents()
         {
             //by loading DB events into memory we avoid having to interface with DB for every little thing
-            //todo: again, is this neccesary ? is this any faster ?
+            //todo: again, is this neccesary ? it is faster, but should it use sqlite directly for simplicity ?
             {
                 string eventsqlQuery = "SELECT * FROM Events ORDER by `EventID` ASC";
                 Sql eventselectCommand = Oxide.Core.Database.Sql.Builder.Append(eventsqlQuery);
@@ -228,7 +230,7 @@ namespace Oxide.Plugins
                         string DemoFilename = Convert.ToString(evententry["DemoFilename"]);
 
                         //events without demo file are orphaned and should be removed
-                        if (!RustigateExtension.RustigateDemoManager.IsDemoOnDisk(DemoFilename))
+                        if (!RustigateExtension.RustigateDemoExt.IsDemoOnDisk(DemoFilename))
                         {
                             Puts($"{DemoFilename} is missing, deleting orphaned event #{EventID}");
 
@@ -240,6 +242,9 @@ namespace Oxide.Plugins
                         PlayerEvent NewEvent = new PlayerEvent(EventID, EventTime, AttackerPlayerName, AttackerPlayerID, DemoFilename);
                         PlayerEvents.Add(NewEvent);
                         NextEventID = EventID + 1;
+
+                        //RustigateExtension keeps track of the demo folder size, but it needs help
+                        RustigateExtension.RustigateDemoExt.NotifyNewDemoCreated(DemoFilename);
 
                         //victims for the event is stored in a different table,
                         //check them now because at this time we can garrente the parent query has been completed
@@ -335,6 +340,7 @@ namespace Oxide.Plugins
             OnPlayerReported(BotReporter, LocalPlayer.displayName, LocalPlayer.UserIDString, "hak", "hes just fuking hak from /testselfreport", "cheat");
             player.Reply("sent");
         }
+
 #endif
         #endregion
 
@@ -387,6 +393,7 @@ namespace Oxide.Plugins
             if(config.DiscordWebhookURL == "" || config.DiscordWebhookURL == "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks")
             {
                 //dont print out an error, chances are the admin doesn't want to use discord
+                //todo: make better folder structure for the demo recordings now that we have filesystem access with RustigateExtension
                 return;
             }
 
@@ -437,7 +444,7 @@ namespace Oxide.Plugins
                         float MaxEventTime = FoundPlayerEvent.MaxEventTimer.Delay + 1.0f;
                         Timer _timer = timer.Once(MaxEventTime, () => PrepareDiscordReport(ReporterID, ReporterName, TargetName, TargetID, ReportSubject, ReportMessage));
 
-                        Puts($"delaying {FoundPlayerEvent.EventID} for {MaxEventTime}seconds");
+                        //Puts($"delaying {FoundPlayerEvent.EventID} for {MaxEventTime}seconds");
                         ///dont return, otherwise if this player is constantly fighting we will never report something
                         //return;
                     }
@@ -550,6 +557,9 @@ namespace Oxide.Plugins
 
         private void Init()
         {
+            //for plugin restarts
+            RustigateExtension.RustigateDemoExt.DemoFolderSize = 0;
+
             config = Config.ReadObject<PluginConfig>();
 
             InitializeDB();
@@ -582,7 +592,7 @@ namespace Oxide.Plugins
                 if (player.Connection.IsRecording)
                 {
                     player.Connection.StopRecording();
-                    Puts("stopping recording for " + player.displayName);
+                    PrintError($"stopping recording for {player.displayName}, EndPlayerEvent did not catch this?");
                 }
             }
 
@@ -605,6 +615,13 @@ namespace Oxide.Plugins
                 }
             }
 #endif
+
+            /* dev note: the SQL DB loads happen as soon as the server starts up
+             * by the time the server finishes loading the map, all queries would have finished
+             * this means plugin hot-reloads which happen very fast dont give the sql queries time to finish
+             * and this function fails to run properly as a result 
+             * this is ok during normal use, but can make testing development of different pruning techniques difficult*/
+            PruneOldEvents();
         }
 
         protected override void LoadDefaultConfig()
@@ -718,7 +735,7 @@ namespace Oxide.Plugins
         {
             if (AttackerPlayer == null || VictimPlayer == null)
             {
-                Puts("error generating event");
+                PrintWarning("error generating event, attacker or victim player was invalid!");
                 return;
             }
 
@@ -785,6 +802,10 @@ namespace Oxide.Plugins
             playerEvent.MinEventTimer.Destroy();
             playerEvent.MaxEventTimer.Destroy();
 
+            RustigateExtension.RustigateDemoExt.NotifyNewDemoCreated(playerEvent.DemoFilename);
+            long DemoSizee = RustigateExtension.RustigateDemoExt.GetDemoSize(playerEvent.DemoFilename);
+            DebugSay($"{DemoSizee}");
+
             //we save it to DB when the event ends to avoid too many updates during combat
             if (!bSkipDBSave)
             {
@@ -822,22 +843,62 @@ namespace Oxide.Plugins
             PlayerActiveEventID.Remove(playerEvent.AttackerID);
             DelayedReportEvents.Remove(EventID);
             DebugSay("event " + EventID + " for " + playerEvent.AttackerName + " has ended");
+
+            //we just finished writing a new demo to disk
+            //make sure to prune old events to honor of MaxDemoFolderSizeMB
+            PruneOldEvents();
         }
 
-        private void DeletePlayerEvent(Int32 EventID)
+        private void PruneOldEvents()
         {
-            //i dont like this Find
+            //if our demo folder is too big, we need to start deleting events starting with the oldest ones
+            long DemoFolderSize = RustigateExtension.RustigateDemoExt.DemoFolderSize;
+            long MaxDemoFolderSize = config.MaxDemoFolderSizeMB * 1000000;
+            DebugSay($"DemoFolderSize {DemoFolderSize}");
+            DebugSay($"config.MaxDemoFolderSizeMB {MaxDemoFolderSize}");
+            if (DemoFolderSize > MaxDemoFolderSize)
+            {
+                List<int> IdxToDelete = new List<int>();
+                long BytesToDelete = DemoFolderSize - MaxDemoFolderSize;
+                long BytesDeleted = 0;
+                for (int i = 0; i < PlayerEvents.Count; i++) //begining of the list is the oldest event
+                {
+                    string DemoFilename = PlayerEvents[i].DemoFilename;
+                    long DemoSize = RustigateExtension.RustigateDemoExt.GetDemoSize(DemoFilename);
+                    BytesDeleted += DemoSize;
+                    IdxToDelete.Add(i);
+                    Puts($"pruning old event [{PlayerEvents[i].EventID}]{DemoFilename}, due to MaxDemoFolderSizeMB");
+
+                    if (BytesDeleted > BytesToDelete)
+                    {
+                        break;
+                    }
+                }
+
+                //dont take chances with deleting items in list while iterating threw it above...
+                for (int i = IdxToDelete.Count - 1; i >= 0; i--)
+                {
+                    int EventIDX = IdxToDelete[i];
+                    DeletePlayerEvent(PlayerEvents[EventIDX].EventID);
+                }
+            }
+        }
+
+        private long DeletePlayerEvent(Int32 EventID)
+        {
+            //todo: i dont like this Find here
             int FoundIDX = PlayerEvents.FindIndex(x => x.EventID == EventID);
             if (FoundIDX == -1)
-                return;
+                return 0;
 
             //just in case we are trying to delete an active event make sure the demofile handle is closed properly...
             EndPlayerEvent(PlayerEvents[FoundIDX].EventID, true);
 
             DeleteEventFromDB(EventID);
-            RustigateExtension.RustigateDemoManager.DeleteDemoFromDisk(PlayerEvents[FoundIDX].DemoFilename);
-
+            long BytesDeleted = RustigateExtension.RustigateDemoExt.DeleteDemoFromDisk(PlayerEvents[FoundIDX].DemoFilename);
             PlayerEvents.RemoveAt(FoundIDX);
+
+            return BytesDeleted;
         }
 
         #endregion
