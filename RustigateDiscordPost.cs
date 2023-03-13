@@ -295,8 +295,8 @@ namespace Oxide.Ext.Rustigate
 
                 string Victims = String.Join(", ", VictimNames);
                 string EmbedTitle = $"{discordReportInfo.AttackerName}[{discordReportInfo.AttackerID}] was reported by {discordReportInfo.ReporterName} for {discordReportInfo.ReportSubject}: {discordReportInfo.ReportMessage}";
-                string ServerIP = "localhost";
-                //string ServerIP = server.Address.MapToIPv4().ToString(); //who the fuk uses ipv6 lmao
+                //string ServerIP = "localhost";
+                string ServerIP = server.Address.MapToIPv4().ToString(); //who the fuk uses ipv6 lmao
 
                 string EmbedDescription = "";
                 foreach (string DemoFilename in DemoFilenames)
