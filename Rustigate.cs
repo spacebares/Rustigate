@@ -55,13 +55,25 @@ namespace Oxide.Plugins
             /*events start the moment a player attacks someone, after MinEventSeconds the event is over and a demo is saved
             however each time the player attacks someone this timer is reset.*/
             public Int32 MinEventSeconds;
+
             /*regardless of how many times a player attacks others during an event, it will always end after MaxEventSeconds
             this prevents a malicious player from just attacking someone every <5min to delay the saving of a demo for review*/
             public Int32 MaxEventSeconds;
-            //see https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks for info
-            public string DiscordWebhookURL;
+
             //if all of our events are larger then this, then we start deleting the oldest events until we are back under
             public Int32 MaxDemoFolderSizeMB;
+
+            //see https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks for info
+            public string DiscordWebhookURL;
+
+            /*set this to the discord server's current boost tier; higher boost teir offers less file attachment clutter.
+            with the default setting, the plugin will have to do multiple attachment messages if there are lots of demos to upload at once
+            if a single demo zipped up is larger then 8MiB it will not upload at all,
+            if your Rust server is producing these large demos then consider boosting your discord server
+            you can always just download the demo directly from the server threw its file management panel or FTP
+
+            @note: if your server's tier does not match, then this will reset and stay locked at 0 until server or plugin is restarted*/
+            public Int32 DiscordServerBoostTier;
         }
 
 
@@ -71,8 +83,9 @@ namespace Oxide.Plugins
             {
                 MinEventSeconds = 30,
                 MaxEventSeconds = 300,
+                MaxDemoFolderSizeMB = 2048,
                 DiscordWebhookURL = "",
-                MaxDemoFolderSizeMB = 2048
+                DiscordServerBoostTier = 0
             };
         }
 
@@ -341,6 +354,18 @@ namespace Oxide.Plugins
             player.Reply("sent");
         }
 
+        //direct test of a big demo file that can never be uploaded to discord (make sure its larger then 8, 50, or 100 MiB depending on discord boost level)
+        [Command("testbigbaddemo")]
+        private void TestBigBadDemo(IPlayer player, string command, string[] args)
+        {
+            RustigateExtension.RustigateDiscordPost.UploadDiscordReportAsync(
+                new List<string> { "demos/massivedemo.dem" },
+                new RustigateDiscordPost.DiscordReportInfo("ass", "ass", "ass", "huge demo test", "this should generate error message"),
+                new List<string> { "DolphinsTestChannel" },
+                DiscordPostCallback);
+            player.Reply("sent");
+        }
+
 #endif
         #endregion
 
@@ -356,11 +381,6 @@ namespace Oxide.Plugins
             */
 
             ulong _TargetID = Convert.ToUInt64(TargetID);
-
-            string ReportMSG = "";
-            string EmbedTitle = $"**{TargetName}**[_{_TargetID}_] was reported by _{ReporterName}_ for {ReportSubject}: {ReportMessage}\n";
-            string EmbedDescription = "";
-
 
             if (_TargetID == 0)
             {
@@ -450,7 +470,6 @@ namespace Oxide.Plugins
             if (bFoundValidEvent)
             {
                 RustigateExtension.RustigateDiscordPost.UploadDiscordReportAsync(
-                    config.DiscordWebhookURL,
                     DemoFilenames,
                     new RustigateDiscordPost.DiscordReportInfo(TargetID, TargetName, ReporterName, ReportSubject, ReportMessage),
                     VictimNames,
@@ -469,10 +488,13 @@ namespace Oxide.Plugins
 
         private void Init()
         {
-            //for plugin restarts
-            RustigateExtension.RustigateDemoExt.DemoFolderSize = 0;
-
             config = Config.ReadObject<PluginConfig>();
+
+            RustigateExtension.RustigateDemoExt.DemoFolderSize = 0; //fixes bug with plugin restarts
+            RustigateExtension.RustigateDiscordPost.LoadDiscordConfig(
+                config.DiscordServerBoostTier,
+                config.DiscordWebhookURL,
+                server.LocalAddress.MapToIPv4().ToString()); //todo: is this the way to transfer config ???
 
             InitializeDB();
             LoadDBEvents();

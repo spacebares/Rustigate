@@ -6,6 +6,10 @@ using System.Linq;
 using System.Net.Http;
 using Newtonsoft.Json;
 using System.Text;
+using Oxide.Game.Rust.Libraries;
+using Oxide.Core;
+using Oxide.Core.Libraries.Covalence;
+using Oxide.Plugins;
 
 namespace Oxide.Ext.Rustigate
 {
@@ -125,6 +129,31 @@ namespace Oxide.Ext.Rustigate
             }
         }
 
+        //as of 3-12-2023, these are the discord boost teir, file attachment limits, with the last one used for debug purposes only
+        private static long[] DiscordAttachmentServerLimits = new long[5]
+            {
+                8000000,
+                8000000,
+                50000000,
+                100000000,
+                9999999999
+            };
+
+        #endregion
+
+        #region Config
+
+        private Int32 DiscordServerBoostTier = 0;
+        private string DiscordWebhookURL = "";
+        private string CurrentServerIP = "localhost";
+
+        public void LoadDiscordConfig(Int32 discordServerBoostTier, string discordWebhookURL, string currentServerIP)
+        {
+            DiscordServerBoostTier = discordServerBoostTier;
+            DiscordWebhookURL = discordWebhookURL;
+            CurrentServerIP = currentServerIP;
+        }
+
         #endregion
 
         #region ZipCrap
@@ -186,10 +215,16 @@ namespace Oxide.Ext.Rustigate
 
         //https://www.aspnetmonsters.com/2016/08/2016-08-27-httpclientwrong/
         private static HttpClient client = new HttpClient();
-        public async void UploadDiscordReportAsync(string url, List<string> DemoFilenames, DiscordReportInfo discordReportInfo, List<string> VictimNames, Action<string> debugcallback)
+        public async void UploadDiscordReportAsync(List<string> DemoFilenames, DiscordReportInfo discordReportInfo, List<string> VictimNames, Action<string> debugcallback)
         {
             try
             {
+                if(DiscordWebhookURL == "")
+                {
+                    debugcallback("DiscordWebhookURL is empty!");
+                    return;
+                }
+
                 ///@ ZipArchive: This property cannot be retrieved when the mode is set to Create, or the mode is set to Update and the entry has been opened.
                 ///is about the dumbest shit i ever herd of https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.ziparchiveentry.length?view=net-7.0
                 ///which would mean i have to compress everyfile, read what size it is when compressed in the zip
@@ -214,7 +249,8 @@ namespace Oxide.Ext.Rustigate
                 //knowing this we can split the zip files based on MaxTotalAttachmentSize and send them threw their own discord post
                 //sadly this means wasting cpu, recompressing the same file again to create the splitted archive
                 //todo: can you merge DotNetZip into the same .dll as the project ???
-                long MaxTotalAttachmentSize = 8000000;
+
+                long MaxTotalAttachmentSize = DiscordAttachmentServerLimits[DiscordServerBoostTier];
                 List<string> MassiveFiles = new List<string>();
                 List<ZippedDemoFiles> FileAttachments = new List<ZippedDemoFiles>();
 
@@ -269,6 +305,8 @@ namespace Oxide.Ext.Rustigate
                     }
                 }
 
+                string ServerIP = CurrentServerIP;
+
                 //the reason why we post each file as a seperate message is for looks
                 //if all the attachments are in their own section and then right after that is the text report
                 //its more readable in discord, instead of posting a text report for each file attachment
@@ -278,25 +316,38 @@ namespace Oxide.Ext.Rustigate
                     using (var formData = new MultipartFormDataContent())
                     {
                         string AttachmentFilename = FileAttachment.ZipFileName;
-                        //AttachmentFilename = Path.GetInvalidFileNameChars().Aggregate(AttachmentFilename, (current, c) => current.Replace(c, '!'));
+
+                        //i took this out cause discord does it for you, but really should keep this... 
+                        //AttachmentFilename = Path.GetInvalidFileNameChars().Aggregate(AttachmentFilename, (current, c) => current.Replace(c, '!')); 
 
                         formData.Add(new ByteArrayContent(FileAttachment.ZipFileData), $"file1", AttachmentFilename);
-                        var fileresponse = await client.PostAsync(url, formData);
+                        var fileresponse = await client.PostAsync(DiscordWebhookURL, formData);
 
                         // ensure the request was a success
                         if (!fileresponse.IsSuccessStatusCode)
                         {
+                            //if we got a file too large, chances are DiscordServerBoostTier is incorrect, or the server's boost teir just expired
+                            //if this is true, we need to reset it back to 0, and send a message saying theres trouble
+                            if (fileresponse.StatusCode.ToString() == "RequestEntityTooLarge")
+                            {
+                                DiscordServerBoostTier = 0;
+
+                                var requeststr = new { content = $"\n\n\n ** !! DiscordServerBoostTier is set incorrectly for {ServerIP}, Some attached files might be missing for this report! Defaulting to {DiscordAttachmentServerLimits[0]/(1000*1000)}MB for future reports !! ** \n\n\n" };
+                                StringContent errorStringContent = new StringContent(JsonConvert.SerializeObject(requeststr), Encoding.UTF8, "application/json");
+                                
+                                await client.PostAsync(DiscordWebhookURL, errorStringContent);
+                                debugcallback("DiscordServerBoostTier is set incorrectly, defaulting to teir 0!");
+                            }
+
                             debugcallback(fileresponse.ReasonPhrase);
                             debugcallback(await fileresponse.Content.ReadAsStringAsync());
-                            return;
+                            //return; //keep going, if theres trouble the admin can resort to manual file transfer
                         }
                     }
                 }
 
                 string Victims = String.Join(", ", VictimNames);
                 string EmbedTitle = $"{discordReportInfo.AttackerName}[{discordReportInfo.AttackerID}] was reported by {discordReportInfo.ReporterName} for {discordReportInfo.ReportSubject}: {discordReportInfo.ReportMessage}";
-                //string ServerIP = "localhost";
-                string ServerIP = server.Address.MapToIPv4().ToString(); //who the fuk uses ipv6 lmao
 
                 string EmbedDescription = "";
                 foreach (string DemoFilename in DemoFilenames)
@@ -322,7 +373,7 @@ namespace Oxide.Ext.Rustigate
                 }
 
                 StringContent stringContent = new StringContent(JsonConvert.SerializeObject(DiscordMessage), Encoding.UTF8, "application/json");
-                var txtresponse = await client.PostAsync(url, stringContent);
+                var txtresponse = await client.PostAsync(DiscordWebhookURL, stringContent);
 
                 // ensure the request was a success
                 if (!txtresponse.IsSuccessStatusCode)

@@ -44,6 +44,13 @@ If `MinEventSeconds` is too small, you can miss alot of information after a play
 
 **MaxDemoFolderSizeMB** is used to limit the size of the demo folder. If over this limit, old demos are deleted to maintain a folder size below this.
 
+**DiscordServerBoostTier** Controls the maximum size of zipped files sent to discord. Discord offers boost teirs 0-3 which is 8/8/50/100MiB file attachment sizes.  
+ - If a report contains a collection of demos that is too large for discord, they will be split into multiple smaller zips for upload automatically.  
+   *Consider boosting your discord server if there is too many file attachments cluttering your view.*  
+ - If a single demo file (while zipped), is larger then what your discord server supports, the upload will fail.  
+   *Consider adjusting MaxEventSeconds to reduce file size or boost your discord server.*  
+ - If the wrong Tier is chosen, or the server's current tier expires, all uploaded file attachments for the next report will fail. The plugin will reset back to DiscordServerBoostTier 0 to prevent future errors. When this happens an error message will be sent to discord. 
+
 # Usage
 1. Check out the discord message from a report
 2. Download the file(s) in the discord message to your computer.

@@ -11,6 +11,7 @@ namespace Oxide.Ext.Rustigate
     public class RustigateExtension : Extension
     {
         public static RustigateDiscordPost RustigateDiscordPost = new RustigateDiscordPost();
+        public static RustigateDemoExt RustigateDemoExt;
 
         /// <summary>
         /// Gets the name of this extension
@@ -25,9 +26,7 @@ namespace Oxide.Ext.Rustigate
         /// <summary>
         /// Gets the version of this extension
         /// </summary>
-        public override VersionNumber Version => new VersionNumber(0, 0, 1);
-
-        public static RustigateDemoExt RustigateDemoExt;
+        public override VersionNumber Version => new VersionNumber(0, 0, 2);
 
         /// <summary>
         /// Initializes a new instance of the MySqlExtension class
