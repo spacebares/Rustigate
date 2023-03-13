@@ -146,12 +146,14 @@ namespace Oxide.Ext.Rustigate
         private Int32 DiscordServerBoostTier = 0;
         private string DiscordWebhookURL = "";
         private string CurrentServerIP = "localhost";
+        private bool bUploadDemosToDiscord = true;
 
-        public void LoadDiscordConfig(Int32 discordServerBoostTier, string discordWebhookURL, string currentServerIP)
+        public void LoadDiscordConfig(Int32 discordServerBoostTier, string discordWebhookURL, bool buploadDemosToDiscord, string currentServerIP)
         {
             DiscordServerBoostTier = discordServerBoostTier;
             DiscordWebhookURL = discordWebhookURL;
             CurrentServerIP = currentServerIP;
+            bUploadDemosToDiscord = buploadDemosToDiscord;
         }
 
         #endregion
@@ -254,53 +256,56 @@ namespace Oxide.Ext.Rustigate
                 List<string> MassiveFiles = new List<string>();
                 List<ZippedDemoFiles> FileAttachments = new List<ZippedDemoFiles>();
 
-                using (MemoryStream ms = new MemoryStream())
+                if (bUploadDemosToDiscord)
                 {
-                    using (ZipArchive masterzip = new ZipArchive(ms, ZipArchiveMode.Create, true))
+                    using (MemoryStream ms = new MemoryStream())
                     {
-                        for (int i = 0; i < DemoFilenames.Count; i++)
+                        using (ZipArchive masterzip = new ZipArchive(ms, ZipArchiveMode.Create, true))
                         {
-                            masterzip.CreateEntryFromFile(DemoFilenames[i], "0");
-                        }
-                    }
-
-                    //now we can read ZipArchiveEntry.CompressedLength properly...
-                    using (ZipArchive masterzip = new ZipArchive(ms, ZipArchiveMode.Read))
-                    {
-                        long TestArchiveSize = 0;
-                        List<string> DemoFilesToZip = new List<string>();
-                        for (int i = 0; i < masterzip.Entries.Count; i++)
-                        {
-                            ZipArchiveEntry zfile = masterzip.Entries[i];
-                            long zfileSize = zfile.CompressedLength;
-
-                            if (zfileSize > MaxTotalAttachmentSize)
+                            for (int i = 0; i < DemoFilenames.Count; i++)
                             {
-                                MassiveFiles.Add(DemoFilenames[i]);
-                                continue;
+                                masterzip.CreateEntryFromFile(DemoFilenames[i], "0");
+                            }
+                        }
+
+                        //now we can read ZipArchiveEntry.CompressedLength properly...
+                        using (ZipArchive masterzip = new ZipArchive(ms, ZipArchiveMode.Read))
+                        {
+                            long TestArchiveSize = 0;
+                            List<string> DemoFilesToZip = new List<string>();
+                            for (int i = 0; i < masterzip.Entries.Count; i++)
+                            {
+                                ZipArchiveEntry zfile = masterzip.Entries[i];
+                                long zfileSize = zfile.CompressedLength;
+
+                                if (zfileSize > MaxTotalAttachmentSize)
+                                {
+                                    MassiveFiles.Add(DemoFilenames[i]);
+                                    continue;
+                                }
+
+                                long FutureTestArchiveSize = TestArchiveSize + zfileSize;
+                                if (FutureTestArchiveSize > MaxTotalAttachmentSize)
+                                {
+                                    //current post is full, make new one
+                                    ZippedDemoFiles zippedDemoFiles = CompressDemoFiles(DemoFilesToZip, discordReportInfo.AttackerName);
+                                    FileAttachments.Add(zippedDemoFiles);
+
+                                    TestArchiveSize = 0;
+                                    DemoFilesToZip.Clear();
+                                }
+
+                                DemoFilesToZip.Add(DemoFilenames[i]);
+                                TestArchiveSize += zfileSize;
                             }
 
-                            long FutureTestArchiveSize = TestArchiveSize + zfileSize;
-                            if (FutureTestArchiveSize > MaxTotalAttachmentSize)
+                            //last file, todo: write all this better lmao
+                            if (DemoFilesToZip.Count > 0)
                             {
                                 //current post is full, make new one
                                 ZippedDemoFiles zippedDemoFiles = CompressDemoFiles(DemoFilesToZip, discordReportInfo.AttackerName);
                                 FileAttachments.Add(zippedDemoFiles);
-
-                                TestArchiveSize = 0;
-                                DemoFilesToZip.Clear();
                             }
-
-                            DemoFilesToZip.Add(DemoFilenames[i]);
-                            TestArchiveSize += zfileSize;
-                        }
-
-                        //last file, todo: write all this better lmao
-                        if(DemoFilesToZip.Count > 0)
-                        {
-                            //current post is full, make new one
-                            ZippedDemoFiles zippedDemoFiles = CompressDemoFiles(DemoFilesToZip, discordReportInfo.AttackerName);
-                            FileAttachments.Add(zippedDemoFiles);
                         }
                     }
                 }

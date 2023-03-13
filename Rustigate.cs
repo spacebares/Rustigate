@@ -74,6 +74,9 @@ namespace Oxide.Plugins
 
             @note: if your server's tier does not match, then this will reset and stay locked at 0 until server or plugin is restarted*/
             public Int32 DiscordServerBoostTier;
+
+            //demofiles are zipped then uploaded to discord. although this happens on a seperate thread, disabling this behavior could improve server performance.
+            public bool UploadDemosToDiscord;
         }
 
 
@@ -85,7 +88,8 @@ namespace Oxide.Plugins
                 MaxEventSeconds = 300,
                 MaxDemoFolderSizeMB = 2048,
                 DiscordWebhookURL = "",
-                DiscordServerBoostTier = 0
+                DiscordServerBoostTier = 0,
+                UploadDemosToDiscord = true
             };
         }
 
@@ -494,6 +498,7 @@ namespace Oxide.Plugins
             RustigateExtension.RustigateDiscordPost.LoadDiscordConfig(
                 config.DiscordServerBoostTier,
                 config.DiscordWebhookURL,
+                config.UploadDemosToDiscord,
                 server.LocalAddress.MapToIPv4().ToString()); //todo: is this the way to transfer config ???
 
             InitializeDB();

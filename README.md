@@ -42,18 +42,21 @@ Now instead of spending hours spectating a player to figure out if they are hack
 Once a player attacks another player, a PlayerEvent is created and a demo starts recording the attacker's POV. The event ends after `MinEventSeconds`, however if the player keeps attacking players they extend the event for another `MinEventSeconds`. If the event takes too long, after `MaxEventSeconds` the event is completed. 
 If `MinEventSeconds` is too small, you can miss alot of information after a player is attacked. And if `MaxEventSeconds` is too large then demofiles may contain alot of useless information like them running back to base and afking.
 
-**MaxDemoFolderSizeMB** is used to limit the size of the demo folder. If over this limit, old demos are deleted to maintain a folder size below this.
+**MaxDemoFolderSizeMB**: is used to limit the size of the demo folder. If over this limit, old demos are deleted to maintain a folder size below this.
 
-**DiscordServerBoostTier** Controls the maximum size of zipped files sent to discord. Discord offers boost teirs 0-3 which is 8/8/50/100MiB file attachment sizes.  
+**DiscordServerBoostTier**: Controls the maximum size of zipped files sent to discord. Discord offers boost teirs 0-3 which is 8/8/50/100MiB file attachment sizes.  
  - If a report contains a collection of demos that is too large for discord, they will be split into multiple smaller zips for upload automatically.  
    *Consider boosting your discord server if there is too many file attachments cluttering your view.*  
  - If a single demo file (while zipped), is larger then what your discord server supports, the upload will fail.  
    *Consider adjusting MaxEventSeconds to reduce file size or boost your discord server.*  
  - If the wrong Tier is chosen, or the server's current tier expires, all uploaded file attachments for the next report will fail. The plugin will reset back to DiscordServerBoostTier 0 to prevent future errors. When this happens an error message will be sent to discord. 
+   
+ **UploadDemosToDiscord**: if set to `false`, prevents demo files from being uploaded to discord. Although this occurs on a seperate thread, disabling this behavior can improve server performance.
 
 # Usage
 1. Check out the discord message from a report
-2. Download the file(s) in the discord message to your computer.
+2. Download the file(s) in the discord message to your computer.  
+   - Or access the server's File system to grab these files
 3. **Disconnect from the server or demo playback wont work.**
 4. Click on the demo button in your Rust Game's main menu.
 [![demobutton](https://i.imgur.com/dF3cknZ.png "demobutton")](https://i.imgur.com/dF3cknZ.png "demobutton")
