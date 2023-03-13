@@ -3,10 +3,10 @@
   <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
   <Import Project="netfx.props" />
   <PropertyGroup>
-    <Version>0.0.1</Version>
+    <Version>0.0.2</Version>
     <AssemblyName>Oxide.Rustigate</AssemblyName>
     <Authors>Spacebares</Authors>
-    <Copyright></Copyright>
+    <Copyright>https://github.com/spacebares/Rustigate</Copyright>
     <Description>Rustigate</Description>
     <RepositoryUrl>https://github.com/spacebares/Rustigate</RepositoryUrl>
     <PackageIconUrl>icon.png</PackageIconUrl>
@@ -17,6 +17,9 @@
     <IsPublishable>False</IsPublishable>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Rustigate.cs" />
+  </ItemGroup>
   <ItemGroup>
     <Reference Include="Assembly-CSharp">
       <HintPath>..\..\steamapps\common\rust_dedicated\RustDedicated_Data\Managed\Assembly-CSharp.dll</HintPath>
@@ -69,6 +72,8 @@
     <Reference Include="Rust.Localization">
       <HintPath>..\..\steamapps\common\rust_dedicated\RustDedicated_Data\Managed\Rust.Localization.dll</HintPath>
     </Reference>
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.Net.Http" />
     <Reference Include="UnityEngine.CoreModule">
       <HintPath>..\..\steamapps\common\rust_dedicated\RustDedicated_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
     </Reference>
@@ -102,6 +107,6 @@
   </ItemGroup>
   </Target>
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="copy bin\Release\net48\Oxide.Rustigate.dll H:\RustSRV\steamapps\common\rust_dedicated\RustDedicated_Data\Managed\Oxide.Rustigate.dll" />
+    <Exec Command="copy bin\Release\net48\Oxide.Rustigate.dll H:\RustSRV\steamapps\common\rust_dedicated\RustDedicated_Data\Managed\Oxide.Rustigate.dll&#xD;&#xA;copy Rustigate.cs H:\RustSRV\steamapps\common\rust_dedicated\oxide\plugins\Rustigate.cs" />
   </Target>
 </Project>

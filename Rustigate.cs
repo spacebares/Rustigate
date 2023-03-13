@@ -20,7 +20,7 @@ using Oxide.Ext.Rustigate;
 
 namespace Oxide.Plugins
 {
-    [Info("Rustigate", "https://github.com/spacebares", "0.0.1")]
+    [Info("Rustigate", "https://github.com/spacebares", "0.0.2")]
     [Description("Automatic demo recording of players when they attack others, with discord notifications for related player reports and an ingame event browser.")]
     class Rustigate : CovalencePlugin
     {
@@ -346,70 +346,6 @@ namespace Oxide.Plugins
 
         #region DiscordAPI
 
-        class DiscordFooter
-        {
-            [JsonProperty("text")]
-            public string Text { get; set; }
-        }
-
-        class DiscordField
-        {
-            [JsonProperty("name")]
-            public string Name { get; set; }
-
-            [JsonProperty("value")]
-            public string Value { get; set; }
-        }
-
-        class DiscordEmbed
-        {
-            [JsonProperty("title")]
-            public string Title { get; set; }
-
-            [JsonProperty("description")]
-            public string Description { get; set; }
-
-            [JsonProperty("color")]
-            public string Color { get; set; }
-
-            [JsonProperty("fields")]
-            public List<DiscordField> Fields { get; set; }
-
-            [JsonProperty("footer")]
-            public DiscordFooter Footer { get; set; }
-        }
-
-        class DiscordMessage
-        {
-            [JsonProperty("content")]
-            public string Content { get; set; }
-
-            [JsonProperty("embeds")]
-            public List<DiscordEmbed> Embeds { get; set; }
-        }
-
-        private void PostDiscordJson(string payloadJson)
-        {
-            if(config.DiscordWebhookURL == "" || config.DiscordWebhookURL == "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks")
-            {
-                //dont print out an error, chances are the admin doesn't want to use discord
-                //todo: make better folder structure for the demo recordings now that we have filesystem access with RustigateExtension
-                return;
-            }
-
-            Dictionary<string, string> headers = new Dictionary<string, string>();
-            headers.Add("Content-Type", "application/json");
-
-            webrequest.Enqueue(config.DiscordWebhookURL, payloadJson, (code, response) => DiscordPostCallBack(code, response), this, Core.Libraries.RequestMethod.POST, headers);
-        }
-        private void DiscordPostCallBack(int code, string response)
-        {
-            if (code != 200 && code != 204)
-            {
-                PrintWarning(String.Format("Discord Api responded with {0}: {1}", code, response));
-            }
-        }
-
         private void PrepareDiscordReport(ulong ReporterID, string ReporterName, string TargetName, string TargetID, string ReportSubject, string ReportMessage)
         {
             /* For this plugin's reports, the admin only wants to know two things: 
@@ -465,7 +401,10 @@ namespace Oxide.Plugins
             DateTime CurrentTime = DateTime.Now;
             DateTime OneHourAgo = CurrentTime.AddHours(-1);
             bool bFoundValidEvent = false;
+
             List<string> VictimNames = new List<string>();
+            List<string> DemoFilenames = new List<string>();
+
             for (int i = PlayerEvents.Count - 1; i >= 0; i--)
             {
                 PlayerEvent playerEvent = PlayerEvents[i];
@@ -491,7 +430,7 @@ namespace Oxide.Plugins
                     //the one doing the reporting needs to be, or be teamed, with one of the victims
                     if (IsPlayerTeamedWith(ReporterID, playerEvent.EventVictims.Keys.ToList()))
                     {
-                        EmbedDescription += $"{playerEvent.DemoFilename} [id:{playerEvent.EventID}]\n";
+                        DemoFilenames.Add(playerEvent.DemoFilename);
                         ReportedEvents.Add(playerEvent.EventID);
 
                         foreach (var EventVictimInfo in playerEvent.EventVictims.Values)
@@ -510,51 +449,23 @@ namespace Oxide.Plugins
 
             if (bFoundValidEvent)
             {
-                SendDiscordReport(ReportMSG, EmbedTitle, EmbedDescription, VictimNames);
+                RustigateExtension.RustigateDiscordPost.UploadDiscordReportAsync(
+                    config.DiscordWebhookURL,
+                    DemoFilenames,
+                    new RustigateDiscordPost.DiscordReportInfo(TargetID, TargetName, ReporterName, ReportSubject, ReportMessage),
+                    VictimNames,
+                    DiscordPostCallback);
             }
         }
 
-        private void SendDiscordReport(string content, string EmbedTitle, string EmbedDescription, List<string> VictimNames)
+        private void DiscordPostCallback(string Message)
         {
-#if DEBUGMODE
-            string ServerIP = "localhost";
-#else
-            string ServerIP = server.Address.MapToIPv4().ToString(); //cause who the fuk uses ipv6 lmao
-#endif
-
-            string Victims = String.Join(", ", VictimNames);
-            List<DiscordField> Fields = new List<DiscordField>();
-            Fields.Add(new DiscordField()
-            {
-                Name = "Victims:",
-                Value = Victims
-            });
-
-            List<DiscordEmbed> DiscordEmbeds = new List<DiscordEmbed>();
-            DiscordEmbeds.Add(new DiscordEmbed()
-            {
-                Title = EmbedTitle,
-                Description = EmbedDescription,
-                Color = "16711680",
-                Fields = Fields,
-                Footer = new DiscordFooter()
-                {
-                    Text = $"from server: {ServerIP}"
-                }
-            });
-
-            string payloadJson = JsonConvert.SerializeObject(new DiscordMessage()
-            {
-                Content = content,
-                Embeds = DiscordEmbeds
-            });
-
-            PostDiscordJson(payloadJson);
+            Interface.Oxide.LogWarning($"DiscordPost: {Message}");
         }
 
         #endregion
 
-        #region Hooks
+            #region Hooks
 
         private void Init()
         {

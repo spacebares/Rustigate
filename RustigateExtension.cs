@@ -1,8 +1,6 @@
 ﻿using System;
-using System.IO;
-using System.Linq;
+using System.Collections.Generic;
 using Oxide.Core;
-using Oxide.Core.Configuration;
 using Oxide.Core.Extensions;
 
 namespace Oxide.Ext.Rustigate
@@ -12,6 +10,8 @@ namespace Oxide.Ext.Rustigate
     /// </summary>
     public class RustigateExtension : Extension
     {
+        public static RustigateDiscordPost RustigateDiscordPost = new RustigateDiscordPost();
+
         /// <summary>
         /// Gets the name of this extension
         /// </summary>
