@@ -12,18 +12,16 @@ Now instead of spending hours spectating a player to figure out if they are hack
 
 ## Features
 - Automatic demo recording of players when they attack others.
-- Messages to Discord *(Webhook)* with demofile location when a player is reported.
 - Automatic pruning of old events to limit diskspace usage.
+- Discord *(Webhook)* report with zipped demofiles as attachment(s) when a player is reported.
+![Discord_AurOWJ62Si](https://user-images.githubusercontent.com/57186372/224603776-077521e4-549b-486a-a479-69fc0f0312f0.png)
 
 #### Planned Features
-- Upload of demofile(s) as discord attachment *(DLL ext)*
 - Ingame event browser 
 
 #### Limitations:
 - Most of the demos are going to start off with a player already getting shot at. Some of these kinds of demos may not reveal much. However against say a team of 2, since the demo has already started recording for the 1st dead player, it will show much more information of what happened to the 2nd player.
 - Rust demos are written to disk once they complete, this means **Disk performance is very important if there are a large amount of active players fighting in your server**.
-
-- Currently **need filesystem access to the server** to download the demofile onto your computer. Demos as fileattachment in the discord messages is a planned feature.
 
 - This plugin is incompatible with other plugins that record demos of players. Rust only allows a single active recording per player. *(To clarify, 300 players fighting = 300 demos being recorded at once, Two recording plugins would be 600 demos at once, which is not possible with the rust demo system)*
 
@@ -48,13 +46,13 @@ If `MinEventSeconds` is too small, you can miss alot of information after a play
 
 # Usage
 1. Check out the discord message from a report
-2. Access the server's filesystem, and download the file(s) in the report to your computer.
+2. Download the file(s) in the discord message to your computer.
 3. **Disconnect from the server or demo playback wont work.**
 4. Click on the demo button in your Rust Game's main menu.
 [![demobutton](https://i.imgur.com/dF3cknZ.png "demobutton")](https://i.imgur.com/dF3cknZ.png "demobutton")
 5. Click the button to open up the demos folder:
 [![demosfolder](https://i.imgur.com/hV6siWg.png "demosfolder")](https://i.imgur.com/hV6siWg.png "demosfolder")
-6. Move the demos you downloaded into the folder that the button opens
+6. Extract the demos you downloaded into the folder that the button opens
 7. Click on the refresh button  
 [![refreshbutton](https://i.imgur.com/WEmYfQz.png "refreshbutton")](https://i.imgur.com/WEmYfQz.png "refreshbutton")
 8. Sort by date so the most recent demos are up top
