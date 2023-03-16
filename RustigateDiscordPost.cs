@@ -116,14 +116,16 @@ namespace Oxide.Ext.Rustigate
             public string AttackerID;
             public string AttackerName;
             public string ReporterName;
+            public string ReporterID;
             public string ReportSubject;
             public string ReportMessage;
 
-            public DiscordReportInfo(string attackerID, string attackerName, string reporterName, string reportSubject, string reportMessage)
+            public DiscordReportInfo(string attackerID, string attackerName, string reporterName, string reporterID, string reportSubject, string reportMessage)
             {
                 AttackerID = attackerID;
                 AttackerName = attackerName;
                 ReporterName = reporterName;
+                ReporterID = reporterID;
                 ReportSubject = reportSubject;
                 ReportMessage = reportMessage;
             }
@@ -221,12 +223,6 @@ namespace Oxide.Ext.Rustigate
         {
             try
             {
-                if(DiscordWebhookURL == "")
-                {
-                    debugcallback("DiscordWebhookURL is empty!");
-                    return;
-                }
-
                 ///@ ZipArchive: This property cannot be retrieved when the mode is set to Create, or the mode is set to Update and the entry has been opened.
                 ///is about the dumbest shit i ever herd of https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.ziparchiveentry.length?view=net-7.0
                 ///which would mean i have to compress everyfile, read what size it is when compressed in the zip
@@ -352,7 +348,7 @@ namespace Oxide.Ext.Rustigate
                 }
 
                 string Victims = String.Join(", ", VictimNames);
-                string EmbedTitle = $"{discordReportInfo.AttackerName}[{discordReportInfo.AttackerID}] was reported by {discordReportInfo.ReporterName} for {discordReportInfo.ReportSubject}: {discordReportInfo.ReportMessage}";
+                string EmbedTitle = $"{discordReportInfo.AttackerName}[{discordReportInfo.AttackerID}] was reported by {discordReportInfo.ReporterName}[{discordReportInfo.ReporterID}] for {discordReportInfo.ReportSubject}: {discordReportInfo.ReportMessage}";
 
                 string EmbedDescription = "";
                 foreach (string DemoFilename in DemoFilenames)

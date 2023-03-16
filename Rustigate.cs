@@ -28,6 +28,7 @@ namespace Oxide.Plugins
         Connection sqlConnection;
 
         private Int32 NextEventID = 0;
+        private Int32 NextReportID = 0;
 
         ///we keep these in memory to avoid having to waste cpu talking with sqlite
         ///todo: this is for sure faster, but is it neccessary? its for sure more memory intensive
@@ -220,6 +221,20 @@ namespace Oxide.Plugins
                 `VictimID`	INTEGER,
                 `EventTime` TEXT
             )"), sqlConnection);
+
+            //need to save what events got reported with who and why they did it for the ingame event browser 
+            sqlLibrary.ExecuteNonQuery(Sql.Builder.Append(
+                @"CREATE TABLE IF NOT EXISTS `EventReports` (
+	            `ReportID`	INTEGER,
+                `TargetName`    TEXT,
+                `TargetID`      INTEGER,
+	            `ReporterName`	TEXT,
+	            `ReporterID`	INTEGER,
+	            `ReportSubject`	TEXT,
+	            `ReportMessage`	TEXT,
+                `ReportEvents`  NUMERIC,
+	            PRIMARY KEY(`ReportID`)
+            )"), sqlConnection);
         }
 
         private void LoadDBEvents()
@@ -316,6 +331,49 @@ namespace Oxide.Plugins
             }
         }
 
+        private void LoadDBReportedEvents()
+        {
+            //todo: load into memory for speedup
+            {
+                string eventsqlQuery = "SELECT * FROM EventReports ORDER by `ReportID` ASC";
+                Sql eventselectCommand = Oxide.Core.Database.Sql.Builder.Append(eventsqlQuery);
+
+                sqlLibrary.Query(eventselectCommand, sqlConnection, eventlist =>
+                {
+                    if (eventlist == null)
+                    {
+                        return; // Empty result or no records found
+                    }
+
+                    // Iterate through resulting records
+                    foreach (var evententry in eventlist)
+                    {
+                        Int32 ReportID = Convert.ToInt32(evententry["ReportID"]);
+
+                        //the sql query above should have kept the ReportIDs in order...
+                        NextReportID = ReportID + 1;
+                    }
+                });
+
+                Puts("finished LoadDBReportedEvents!");
+            }
+        }
+
+        //todo, these arguments look alot like RustigateExtension.RustigateDiscordPost.DiscordReportInfo
+        private void InsertReportedEventToDB(Int32 ReportID, string TargetName, ulong TargetID, string ReporterName, ulong ReporterID, string ReportSubject, string ReportMessage, List<Int32> EventIDs)
+        {
+            string EventIDsAsString = string.Join(",", EventIDs);
+            string sqlQuery = "INSERT INTO EventReports (`ReportID`, `TargetName`, TargetID`, `ReporterName`, `ReporterID`, `ReportSubject`, `ReportMessage`, `EventIDsAsString`) VALUES (@0, @1, @2, @3, @4, @5, @6, @7);";
+            Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, ReportID, EventIDs, TargetName, TargetID, ReporterName, ReporterID, ReportSubject, ReportMessage);
+            sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
+            {
+                if (rowsAffected == 0)
+                {
+                    RaiseError("Could not insert record into DB!");
+                }
+            });
+        }
+
         #endregion
 
         #region ChatCommands
@@ -364,7 +422,7 @@ namespace Oxide.Plugins
         {
             RustigateExtension.RustigateDiscordPost.UploadDiscordReportAsync(
                 new List<string> { "demos/massivedemo.dem" },
-                new RustigateDiscordPost.DiscordReportInfo("ass", "ass", "ass", "huge demo test", "this should generate error message"),
+                new RustigateDiscordPost.DiscordReportInfo("ass", "ass", "ass", "ass", "huge demo test", "this should generate error message"),
                 new List<string> { "DolphinsTestChannel" },
                 DiscordPostCallback);
             player.Reply("sent");
@@ -424,10 +482,10 @@ namespace Oxide.Plugins
              * lets stop at say 1 hour timespan? what player would wait that long to report someone? lmao*/
             DateTime CurrentTime = DateTime.Now;
             DateTime OneHourAgo = CurrentTime.AddHours(-1);
-            bool bFoundValidEvent = false;
 
             List<string> VictimNames = new List<string>();
             List<string> DemoFilenames = new List<string>();
+            List<Int32> RelatedEventIDs = new List<Int32>();
 
             for (int i = PlayerEvents.Count - 1; i >= 0; i--)
             {
@@ -466,18 +524,24 @@ namespace Oxide.Plugins
                             }
                         }
 
-                        bFoundValidEvent = true;
+                        RelatedEventIDs.Add(playerEvent.EventID);
                     }
                 }
             }
 
-            if (bFoundValidEvent)
+            if (RelatedEventIDs.Count > 0)
             {
-                RustigateExtension.RustigateDiscordPost.UploadDiscordReportAsync(
-                    DemoFilenames,
-                    new RustigateDiscordPost.DiscordReportInfo(TargetID, TargetName, ReporterName, ReportSubject, ReportMessage),
-                    VictimNames,
-                    DiscordPostCallback);
+                if (config.DiscordWebhookURL != "")
+                {
+                    RustigateExtension.RustigateDiscordPost.UploadDiscordReportAsync(
+                        DemoFilenames,
+                        new RustigateDiscordPost.DiscordReportInfo(TargetID, TargetName, ReporterName, ReporterID.ToString(), ReportSubject, ReportMessage),
+                        VictimNames,
+                        DiscordPostCallback);
+                }
+
+                InsertReportedEventToDB(NextReportID, TargetName, Convert.ToUInt64(TargetID), ReporterName, ReporterID, ReportSubject, ReportMessage, RelatedEventIDs);
+                NextReportID++;
             }
         }
 
@@ -488,7 +552,7 @@ namespace Oxide.Plugins
 
         #endregion
 
-            #region Hooks
+        #region Hooks
 
         private void Init()
         {
@@ -503,6 +567,7 @@ namespace Oxide.Plugins
 
             InitializeDB();
             LoadDBEvents();
+            LoadDBReportedEvents();
         }
 
         private void Unload()
