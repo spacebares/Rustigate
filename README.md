@@ -19,6 +19,8 @@ Now instead of spending hours spectating a player to figure out if they are hack
 
 #### Planned Features
 - Search functions for the in-game Events browser
+- Transition to an always-On demo recording system
+  - Events would record timestamps of player actions, shot playerName @ 1:33, looted stash @ 1:55, teamed with playerName @ 2:03 etc.
 
 #### Limitations:
 - Most of the demos are going to start off with a player already getting shot at. Some of these kinds of demos may not reveal much. However against say a team of 2, since the demo has already started recording for the 1st dead player, it will show much more information of what happened to the 2nd player.
