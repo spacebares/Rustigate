@@ -11,13 +11,14 @@ Now instead of spending hours spectating a player to figure out if they are hack
 
 
 ## Features
+- In-game browser listing all recorded demo events on the server. (/showevents)
 - Automatic demo recording of players when they attack others.
 - Automatic pruning of old events to limit diskspace usage.
 - Discord *(Webhook)* report with zipped demofiles as attachment(s) when a player is reported.
 ![Discord_AurOWJ62Si](https://user-images.githubusercontent.com/57186372/224603776-077521e4-549b-486a-a479-69fc0f0312f0.png)
 
 #### Planned Features
-- Ingame event browser 
+- Search functions for the in-game Events browser
 
 #### Limitations:
 - Most of the demos are going to start off with a player already getting shot at. Some of these kinds of demos may not reveal much. However against say a team of 2, since the demo has already started recording for the 1st dead player, it will show much more information of what happened to the 2nd player.
@@ -29,11 +30,13 @@ Now instead of spending hours spectating a player to figure out if they are hack
 - 2GB diskspace for demofiles *(Configurable)*
 
 # Installation:
-1. Copy Rustigate.cs to your servers */oxide/plugins/* directory.
-2. Run the server once to generate config file. *(If already running, it should just autoload)*
-3. Open the newly created config file that is */oxide/config/Rustigate.json*
-4. Paste in your [Discord Webhook](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks "Discord Webhook") URL inside the quotes.
-5. run `oxide.reload Rustigate` or just Restart the server.
+1. Extract zip to your rust server's main directory, Or -  
+  1a. Copy Rustigate.cs to your servers */oxide/plugins/* directory.  
+  1b. Copy Oxide.Rustigate.dll to */RustDedicated_Data/Managed* directory.  
+3. Run the server once to generate config file. *(If already running, it should just autoload)*
+4. Open the newly created config file that is */oxide/config/Rustigate.json*
+5. Paste in your [Discord Webhook](https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks "Discord Webhook") URL inside the quotes.
+6. run `oxide.reload Rustigate` or just Restart the server.
 
 # Configuration
 *Default settings should be ok*
@@ -55,6 +58,7 @@ If `MinEventSeconds` is too small, you can miss alot of information after a play
 
 # Usage
 1. Check out the discord message from a report
+   - Or use chat command `/showevents`, pick an event and hit _Send to Discord_
 2. Download the file(s) in the discord message to your computer.  
    - Or access the server's File system to grab these files
 3. **Disconnect from the server or demo playback wont work.**
