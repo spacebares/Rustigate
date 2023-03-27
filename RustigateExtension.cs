@@ -26,7 +26,7 @@ namespace Oxide.Ext.Rustigate
         /// <summary>
         /// Gets the version of this extension
         /// </summary>
-        public override VersionNumber Version => new VersionNumber(0, 0, 2);
+        public override VersionNumber Version => new VersionNumber(0, 0, 3);
 
         /// <summary>
         /// Initializes a new instance of the MySqlExtension class

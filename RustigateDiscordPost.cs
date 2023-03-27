@@ -10,6 +10,7 @@ using Oxide.Game.Rust.Libraries;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Plugins;
+using static Oxide.Ext.Rustigate.RustigateDiscordPost;
 
 namespace Oxide.Ext.Rustigate
 {
@@ -215,7 +216,135 @@ namespace Oxide.Ext.Rustigate
             }
             return ReturnValue;
         }
+
+        private void GetDiscordFileAttachments(string FilePrefix, List<string> DemoFilenames, out List<ZippedDemoFiles> FileAttachments, out List<string> MassiveFiles)
+        {
+            ///@ ZipArchive: This property cannot be retrieved when the mode is set to Create, or the mode is set to Update and the entry has been opened.
+            ///is about the dumbest shit i ever herd of https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.ziparchiveentry.length?view=net-7.0
+            ///which would mean i have to compress everyfile, read what size it is when compressed in the zip
+            ///then iterate again building split zips recompressing the same files again, uploading every 8MiB...
+            ///
+            ///i had written all this with GZip, where we still compress everything but now we know the size,
+            ///so just send it out in sets of 8MiB but now we need to be under 10 attachments
+            ///however it was very spammy in discord, whole screen would get plastered in file attachments, it was very messy
+            ///and the admin has to download each gz individually and extract each one..
+            ///
+            ///for ZipArchive i tried writing the final file by splitting the buffer every x bytes, winrar or 7zip dint know what the fuck it was trying to read
+            ///but with python you could piece it back together to form the original zip just fine... dont want admins having to do that, its just stupid
+            ///
+            ///also tried taking the original zipped file stream, and tried copying it to a new zipfilestream with compression turned off, theres an issue with this:
+            ///in ZipArchiveEntry @ GetDataDecompressor() which is used to read the stream inside of the zip, it decompresses it first...
+            ///no way to access _compressedBytes directly...
+            ///
+            ///and i dont want to have to include DotNetZip with the project...
+            ///
+
+            //like explained above, we zip up all the demofiles so we can know their compressed filesize
+            //knowing this we can split the zip files based on MaxTotalAttachmentSize and send them threw their own discord post
+            //sadly this means wasting cpu, recompressing the same file again to create the splitted archive
+            //todo: can you merge DotNetZip into the same .dll as the project ???
+
+            long MaxTotalAttachmentSize = DiscordAttachmentServerLimits[DiscordServerBoostTier];
+            MassiveFiles = new List<string>();
+            FileAttachments = new List<ZippedDemoFiles>();
+
+            if (bUploadDemosToDiscord)
+            {
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    using (ZipArchive masterzip = new ZipArchive(ms, ZipArchiveMode.Create, true))
+                    {
+                        for (int i = 0; i < DemoFilenames.Count; i++)
+                        {
+                            masterzip.CreateEntryFromFile(DemoFilenames[i], "0");
+                        }
+                    }
+
+                    //now we can read ZipArchiveEntry.CompressedLength properly...
+                    using (ZipArchive masterzip = new ZipArchive(ms, ZipArchiveMode.Read))
+                    {
+                        long TestArchiveSize = 0;
+                        List<string> DemoFilesToZip = new List<string>();
+                        for (int i = 0; i < masterzip.Entries.Count; i++)
+                        {
+                            ZipArchiveEntry zfile = masterzip.Entries[i];
+                            long zfileSize = zfile.CompressedLength;
+
+                            if (zfileSize > MaxTotalAttachmentSize)
+                            {
+                                MassiveFiles.Add(DemoFilenames[i]);
+                                continue;
+                            }
+
+                            long FutureTestArchiveSize = TestArchiveSize + zfileSize;
+                            if (FutureTestArchiveSize > MaxTotalAttachmentSize)
+                            {
+                                //current post is full, make new one
+                                ZippedDemoFiles zippedDemoFiles = CompressDemoFiles(DemoFilesToZip, FilePrefix);
+                                FileAttachments.Add(zippedDemoFiles);
+
+                                TestArchiveSize = 0;
+                                DemoFilesToZip.Clear();
+                            }
+
+                            DemoFilesToZip.Add(DemoFilenames[i]);
+                            TestArchiveSize += zfileSize;
+                        }
+
+                        //last file, todo: write all this better lmao
+                        if (DemoFilesToZip.Count > 0)
+                        {
+                            //current post is full, make new one
+                            ZippedDemoFiles zippedDemoFiles = CompressDemoFiles(DemoFilesToZip, FilePrefix);
+                            FileAttachments.Add(zippedDemoFiles);
+                        }
+                    }
+                }
+            }
+        }
         #endregion
+
+        private async void UploadFileAttachmentsToDiscord(List<ZippedDemoFiles> FileAttachments, Action<string> debugcallback)
+        {
+            //the reason why we post each file as a seperate message is for looks
+            //if all the attachments are in their own section and then right after that is the text report
+            //its more readable in discord, instead of posting a text report for each file attachment
+            //one report from a player should be one text post, along side its file attachments
+            foreach (ZippedDemoFiles FileAttachment in FileAttachments)
+            {
+                using (var formData = new MultipartFormDataContent())
+                {
+                    string AttachmentFilename = FileAttachment.ZipFileName;
+
+                    //i took this out cause discord does it for you, but really should keep this... 
+                    //AttachmentFilename = Path.GetInvalidFileNameChars().Aggregate(AttachmentFilename, (current, c) => current.Replace(c, '!')); 
+
+                    formData.Add(new ByteArrayContent(FileAttachment.ZipFileData), $"file1", AttachmentFilename);
+                    var fileresponse = await client.PostAsync(DiscordWebhookURL, formData);
+
+                    // ensure the request was a success
+                    if (!fileresponse.IsSuccessStatusCode)
+                    {
+                        //if we got a file too large, chances are DiscordServerBoostTier is incorrect, or the server's boost teir just expired
+                        //if this is true, we need to reset it back to 0, and send a message saying theres trouble
+                        if (fileresponse.StatusCode.ToString() == "RequestEntityTooLarge")
+                        {
+                            DiscordServerBoostTier = 0;
+
+                            var requeststr = new { content = $"\n\n\n ** !! DiscordServerBoostTier is set incorrectly for {CurrentServerIP}, Some attached files might be missing for this report! Defaulting to {DiscordAttachmentServerLimits[0] / (1000 * 1000)}MB for future reports !! ** \n\n\n" };
+                            StringContent errorStringContent = new StringContent(JsonConvert.SerializeObject(requeststr), Encoding.UTF8, "application/json");
+
+                            await client.PostAsync(DiscordWebhookURL, errorStringContent);
+                            debugcallback("DiscordServerBoostTier is set incorrectly, defaulting to teir 0!");
+                        }
+
+                        debugcallback(fileresponse.ReasonPhrase);
+                        debugcallback(await fileresponse.Content.ReadAsStringAsync());
+                        //return; //keep going, post what can be posted. if theres trouble the admin can resort to manual file transfer
+                    }
+                }
+            }
+        }
 
         //https://www.aspnetmonsters.com/2016/08/2016-08-27-httpclientwrong/
         private static HttpClient client = new HttpClient();
@@ -223,129 +352,12 @@ namespace Oxide.Ext.Rustigate
         {
             try
             {
-                ///@ ZipArchive: This property cannot be retrieved when the mode is set to Create, or the mode is set to Update and the entry has been opened.
-                ///is about the dumbest shit i ever herd of https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.ziparchiveentry.length?view=net-7.0
-                ///which would mean i have to compress everyfile, read what size it is when compressed in the zip
-                ///then iterate again building split zips recompressing the same files again, uploading every 8MiB...
-                ///
-                ///i had written all this with GZip, where we still compress everything but now we know the size,
-                ///so just send it out in sets of 8MiB but now we need to be under 10 attachments
-                ///however it was very spammy in discord, whole screen would get plastered in file attachments, it was very messy
-                ///and the admin has to download each gz individually and extract each one..
-                ///
-                ///for ZipArchive i tried writing the final file by splitting the buffer every x bytes, winrar or 7zip dint know what the fuck it was trying to read
-                ///but with python you could piece it back together to form the original zip just fine... dont want admins having to do that, its just stupid
-                ///
-                ///also tried taking the original zipped file stream, and tried copying it to a new zipfilestream with compression turned off, theres an issue with this:
-                ///in ZipArchiveEntry @ GetDataDecompressor() which is used to read the stream inside of the zip, it decompresses it first...
-                ///no way to access _compressedBytes directly...
-                ///
-                ///and i dont want to have to include DotNetZip with the project...
-                ///
-
-                //like explained above, we zip up all the demofiles so we can know their compressed filesize
-                //knowing this we can split the zip files based on MaxTotalAttachmentSize and send them threw their own discord post
-                //sadly this means wasting cpu, recompressing the same file again to create the splitted archive
-                //todo: can you merge DotNetZip into the same .dll as the project ???
-
-                long MaxTotalAttachmentSize = DiscordAttachmentServerLimits[DiscordServerBoostTier];
-                List<string> MassiveFiles = new List<string>();
-                List<ZippedDemoFiles> FileAttachments = new List<ZippedDemoFiles>();
-
-                if (bUploadDemosToDiscord)
-                {
-                    using (MemoryStream ms = new MemoryStream())
-                    {
-                        using (ZipArchive masterzip = new ZipArchive(ms, ZipArchiveMode.Create, true))
-                        {
-                            for (int i = 0; i < DemoFilenames.Count; i++)
-                            {
-                                masterzip.CreateEntryFromFile(DemoFilenames[i], "0");
-                            }
-                        }
-
-                        //now we can read ZipArchiveEntry.CompressedLength properly...
-                        using (ZipArchive masterzip = new ZipArchive(ms, ZipArchiveMode.Read))
-                        {
-                            long TestArchiveSize = 0;
-                            List<string> DemoFilesToZip = new List<string>();
-                            for (int i = 0; i < masterzip.Entries.Count; i++)
-                            {
-                                ZipArchiveEntry zfile = masterzip.Entries[i];
-                                long zfileSize = zfile.CompressedLength;
-
-                                if (zfileSize > MaxTotalAttachmentSize)
-                                {
-                                    MassiveFiles.Add(DemoFilenames[i]);
-                                    continue;
-                                }
-
-                                long FutureTestArchiveSize = TestArchiveSize + zfileSize;
-                                if (FutureTestArchiveSize > MaxTotalAttachmentSize)
-                                {
-                                    //current post is full, make new one
-                                    ZippedDemoFiles zippedDemoFiles = CompressDemoFiles(DemoFilesToZip, discordReportInfo.AttackerName);
-                                    FileAttachments.Add(zippedDemoFiles);
-
-                                    TestArchiveSize = 0;
-                                    DemoFilesToZip.Clear();
-                                }
-
-                                DemoFilesToZip.Add(DemoFilenames[i]);
-                                TestArchiveSize += zfileSize;
-                            }
-
-                            //last file, todo: write all this better lmao
-                            if (DemoFilesToZip.Count > 0)
-                            {
-                                //current post is full, make new one
-                                ZippedDemoFiles zippedDemoFiles = CompressDemoFiles(DemoFilesToZip, discordReportInfo.AttackerName);
-                                FileAttachments.Add(zippedDemoFiles);
-                            }
-                        }
-                    }
-                }
+                List<string> MassiveFiles;
+                List<ZippedDemoFiles> FileAttachments;
+                GetDiscordFileAttachments(discordReportInfo.AttackerName, DemoFilenames, out FileAttachments, out MassiveFiles);
+                UploadFileAttachmentsToDiscord(FileAttachments, debugcallback);
 
                 string ServerIP = CurrentServerIP;
-
-                //the reason why we post each file as a seperate message is for looks
-                //if all the attachments are in their own section and then right after that is the text report
-                //its more readable in discord, instead of posting a text report for each file attachment
-                //one report from a player should be one text post, along side its file attachments
-                foreach (ZippedDemoFiles FileAttachment in FileAttachments)
-                {
-                    using (var formData = new MultipartFormDataContent())
-                    {
-                        string AttachmentFilename = FileAttachment.ZipFileName;
-
-                        //i took this out cause discord does it for you, but really should keep this... 
-                        //AttachmentFilename = Path.GetInvalidFileNameChars().Aggregate(AttachmentFilename, (current, c) => current.Replace(c, '!')); 
-
-                        formData.Add(new ByteArrayContent(FileAttachment.ZipFileData), $"file1", AttachmentFilename);
-                        var fileresponse = await client.PostAsync(DiscordWebhookURL, formData);
-
-                        // ensure the request was a success
-                        if (!fileresponse.IsSuccessStatusCode)
-                        {
-                            //if we got a file too large, chances are DiscordServerBoostTier is incorrect, or the server's boost teir just expired
-                            //if this is true, we need to reset it back to 0, and send a message saying theres trouble
-                            if (fileresponse.StatusCode.ToString() == "RequestEntityTooLarge")
-                            {
-                                DiscordServerBoostTier = 0;
-
-                                var requeststr = new { content = $"\n\n\n ** !! DiscordServerBoostTier is set incorrectly for {ServerIP}, Some attached files might be missing for this report! Defaulting to {DiscordAttachmentServerLimits[0]/(1000*1000)}MB for future reports !! ** \n\n\n" };
-                                StringContent errorStringContent = new StringContent(JsonConvert.SerializeObject(requeststr), Encoding.UTF8, "application/json");
-                                
-                                await client.PostAsync(DiscordWebhookURL, errorStringContent);
-                                debugcallback("DiscordServerBoostTier is set incorrectly, defaulting to teir 0!");
-                            }
-
-                            debugcallback(fileresponse.ReasonPhrase);
-                            debugcallback(await fileresponse.Content.ReadAsStringAsync());
-                            //return; //keep going, if theres trouble the admin can resort to manual file transfer
-                        }
-                    }
-                }
 
                 string Victims = String.Join(", ", VictimNames);
                 string EmbedTitle = $"{discordReportInfo.AttackerName}[{discordReportInfo.AttackerID}] was reported by {discordReportInfo.ReporterName}[{discordReportInfo.ReporterID}] for {discordReportInfo.ReportSubject}: {discordReportInfo.ReportMessage}";
@@ -393,6 +405,19 @@ namespace Oxide.Ext.Rustigate
                 debugcallback(e.StackTrace);
                 throw;
             }
+        }
+
+        public async void UploadSimpleFileMessageAsync(List<string> DemoFilenames, string ZipFilePrefix, string MessageText, Action<string> debugcallback)
+        {
+            List<string> MassiveFiles;
+            List<ZippedDemoFiles> FileAttachments;
+            GetDiscordFileAttachments(ZipFilePrefix, DemoFilenames, out FileAttachments, out MassiveFiles);
+            UploadFileAttachmentsToDiscord(FileAttachments, debugcallback);
+
+            DiscordJsonMessage DiscordMessage = new DiscordJsonMessage();
+            DiscordMessage.Content = MessageText;
+            StringContent stringContent = new StringContent(JsonConvert.SerializeObject(DiscordMessage), Encoding.UTF8, "application/json");
+            var txtresponse = await client.PostAsync(DiscordWebhookURL, stringContent);
         }
     }
 }

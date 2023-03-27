@@ -9,21 +9,22 @@ using System;
 using System.Linq;
 using UnityEngine;
 using Oxide.Ext.Rustigate;
-
-//todo: this plugin is going to run into disk space issues due to all the demo files:
-//1. oxide currently has no way of knowing how much diskspace is free on the host
-//2. even if somehow i can get the demos to be within oxides data folder, oxide has no way of deleting files
-//therfor at somepoint the demofiles need to be in a YYYY/MM/DD folder structure
-//this way admin has an easier time pruning old data by just using host filesystem.
-//afterwards its up to the plugin during startup to recognize these files are missing and remove events from DB
-//  - it seems like automatic event pruning and discord file upload can be done threw an oxide extension?
+using Oxide.Game.Rust.Cui;
+using System.Media;
+using System.Runtime.CompilerServices;
+using static Oxide.Plugins.Rustigate;
+using static CombatLog;
+using static Oxide.Core.RemoteLogger;
+using System.Text.RegularExpressions;
 
 namespace Oxide.Plugins
 {
-    [Info("Rustigate", "https://github.com/spacebares", "0.0.2")]
+    [Info("Rustigate", "https://github.com/spacebares", "0.0.3")]
     [Description("Automatic demo recording of players when they attack others, with discord notifications for related player reports and an ingame event browser.")]
     class Rustigate : CovalencePlugin
     {
+        #region GlobalFields
+
         Core.SQLite.Libraries.SQLite sqlLibrary = Interface.Oxide.GetLibrary<Core.SQLite.Libraries.SQLite>();
         Connection sqlConnection;
 
@@ -31,7 +32,6 @@ namespace Oxide.Plugins
         private Int32 NextReportID = 0;
 
         ///we keep these in memory to avoid having to waste cpu talking with sqlite
-        ///todo: this is for sure faster, but is it neccessary? its for sure more memory intensive
         private List<PlayerEvent> PlayerEvents = new List<PlayerEvent>();
         private Dictionary<ulong, Int32> PlayerActiveEventID = new Dictionary<ulong, Int32>();
 
@@ -39,15 +39,18 @@ namespace Oxide.Plugins
         //this contains all the events a player has been involved with
         private Dictionary<ulong, List<Int32>> EventPlayers = new Dictionary<ulong, List<Int32>>();
 
-        //events that have been reported by players (F7 Report), ignored for future discord reports
-        private HashSet<Int32> ReportedEvents = new HashSet<Int32>();
+        //events that have been reported by players (F7 Report)
+        private Dictionary<Int32, EventReport> EventReports = new Dictionary<Int32, EventReport>();
 
         //events that are waiting to complete before being reported
         private HashSet<Int32> DelayedReportEvents = new HashSet<Int32>();
 
 #if DEBUGMODE
         private List<BasePlayer> Bots = new List<BasePlayer>();
+        private Int32 NumBots = 5;
 #endif
+
+        #endregion
 
         #region Config
 
@@ -100,7 +103,7 @@ namespace Oxide.Plugins
 
         #region Classes
 
-        public class EventVictimInfo
+        internal class EventVictimInfo
         {
             public ulong PlayerID;
             public string PlayerName;
@@ -127,7 +130,7 @@ namespace Oxide.Plugins
             }
         }
 
-        public class PlayerEvent
+        internal class PlayerEvent
         {
             public Int32 EventID;
 
@@ -145,7 +148,13 @@ namespace Oxide.Plugins
             public Timer MinEventTimer;
             public Timer MaxEventTimer;
 
-            public PlayerEvent() { }
+            //this is the F7 report related to this event
+            public Int32 ReportID;
+
+            public PlayerEvent()
+            {
+                this.ReportID = -1;
+            }
             public PlayerEvent(Int32 EventID, BasePlayer AttackerPlayer, BasePlayer VictimPlayer, string DemoFilename, Timer MinEventTimer, Timer MaxEventTimer)
             {
                 this.EventID = EventID;
@@ -161,6 +170,8 @@ namespace Oxide.Plugins
                 this.DemoFilename = DemoFilename;
                 this.MinEventTimer = MinEventTimer;
                 this.MaxEventTimer = MaxEventTimer;
+
+                this.ReportID = -1;
             }
 
             public PlayerEvent(Int32 EventID, DateTime EventTime, string AttackerPlayerName, ulong AttackerPlayerID, string DemoFilename)
@@ -172,6 +183,8 @@ namespace Oxide.Plugins
 
                 this.EventTime = EventTime;
                 this.DemoFilename = DemoFilename;
+
+                this.ReportID = -1;
             }
 
             public void RefreshEventTimer()
@@ -190,7 +203,38 @@ namespace Oxide.Plugins
                 //player is actively hitting ppl so keep refreshing timer
                 RefreshEventTimer();
             }
+
+            public string GetEventVictimNames()
+            {
+                string VictimNames = "";
+
+                int num = 0;
+                foreach (var EventVictim in EventVictims)
+                {
+                    num++;
+                    EventVictimInfo eventVictimInfo = EventVictim.Value;
+                    VictimNames += eventVictimInfo.PlayerName;
+
+                    if (num < EventVictims.Count)
+                        VictimNames += ", ";
+                }
+
+                return VictimNames;
+            }
         }
+
+        internal class EventReport
+        {
+            public Int32 ReportID;
+            public string TargetName;
+            public ulong TargetID;
+            public string ReporterName;
+            public ulong ReporterID;
+            public string ReportSubject;
+            public string ReportMessage;
+            public List<Int32> EventIDs = new List<Int32>();
+        }
+
         #endregion
 
         #region DB
@@ -232,7 +276,7 @@ namespace Oxide.Plugins
 	            `ReporterID`	INTEGER,
 	            `ReportSubject`	TEXT,
 	            `ReportMessage`	TEXT,
-                `ReportEvents`  NUMERIC,
+                `ReportEvents`  TEXT,
 	            PRIMARY KEY(`ReportID`)
             )"), sqlConnection);
         }
@@ -275,45 +319,51 @@ namespace Oxide.Plugins
                         PlayerEvents.Add(NewEvent);
                         NextEventID = EventID + 1;
 
-                        //RustigateExtension keeps track of the demo folder size, but it needs help
+                        //RustigateExtension keeps track of the demo folder size, but it needs our help
                         RustigateExtension.RustigateDemoExt.NotifyNewDemoCreated(DemoFilename);
-
-                        //victims for the event is stored in a different table,
-                        //check them now because at this time we can garrente the parent query has been completed
-                        ///its also worth noting that the local variables above like NewEvent are inaccessable 
-                        ///since the following code below inside the query runs async at a later time
-                        {
-                            string victimsqlQuery = "SELECT * FROM Victims WHERE `EventID` is @0;";
-                            Sql victimselectCommand = Oxide.Core.Database.Sql.Builder.Append(victimsqlQuery, EventID);
-
-                            sqlLibrary.Query(victimselectCommand, sqlConnection, victimlist =>
-                            {
-                                if (victimlist == null)
-                                {
-                                    return; // Empty result or no records found
-                                }
-
-                                // Iterate through resulting records
-                                foreach (var victimentry in victimlist)
-                                {
-                                    Int32 VictimEventID = Convert.ToInt32(victimentry["EventID"]);
-
-                                    PlayerEvent foundPlayerEvent;
-                                    if (FindPlayerEvent(VictimEventID, out foundPlayerEvent))
-                                    {
-                                        string VictimName = Convert.ToString(victimentry["VictimName"]);
-                                        ulong VictimID = Convert.ToUInt64(victimentry["VictimID"]);
-                                        DateTime VictimEventTime = DateTime.Parse(Convert.ToString(victimentry["EventTime"]));
-
-                                        foundPlayerEvent.EventVictims.Add(VictimID, new EventVictimInfo(VictimID, VictimName, VictimEventTime));
-                                    }
-                                }
-                            });
-                        }
                     }
                 });
 
                 Puts("finished LoadDBEvents!");
+            }
+        }
+
+        private void LoadDBEventVictims()
+        {
+            //victims for the event is stored in its own table
+            {
+                string victimsqlQuery = "SELECT * FROM Victims"; //0,1,2,3 is faster for Find().. i think
+                Sql victimselectCommand = Oxide.Core.Database.Sql.Builder.Append(victimsqlQuery);
+
+                sqlLibrary.Query(victimselectCommand, sqlConnection, victimlist =>
+                {
+                    if (victimlist == null)
+                    {
+                        return; // Empty result or no records found
+                    }
+
+                    // Iterate through resulting records
+                    foreach (var victimentry in victimlist)
+                    {
+                        Int32 VictimEventID = Convert.ToInt32(victimentry["EventID"]);
+
+                        PlayerEvent foundPlayerEvent;
+                        if (FindPlayerEvent(VictimEventID, out foundPlayerEvent))
+                        {
+                            string VictimName = Convert.ToString(victimentry["VictimName"]);
+                            ulong VictimID = Convert.ToUInt64(victimentry["VictimID"]);
+                            DateTime VictimEventTime = DateTime.Parse(Convert.ToString(victimentry["EventTime"]));
+
+                            foundPlayerEvent.EventVictims.Add(VictimID, new EventVictimInfo(VictimID, VictimName, VictimEventTime));
+                        }
+                        else
+                        {
+                            RaiseError($"!!! COULD NOT FIND EVENTID: {VictimEventID} FOR VICTIMS !!!");
+                        }
+                    }
+                });
+
+                Puts("finished LoadDBEventVictims!");
             }
         }
 
@@ -331,7 +381,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void LoadDBReportedEvents()
+        private void LoadDBEventReports()
         {
             //todo: load into memory for speedup
             {
@@ -349,6 +399,43 @@ namespace Oxide.Plugins
                     foreach (var evententry in eventlist)
                     {
                         Int32 ReportID = Convert.ToInt32(evententry["ReportID"]);
+                        string TargetName = Convert.ToString(evententry["TargetName"]);
+                        ulong TargetID = Convert.ToUInt64(evententry["TargetID"]);
+                        string ReporterName = Convert.ToString(evententry["ReporterName"]);
+                        ulong ReporterID = Convert.ToUInt64(evententry["ReporterID"]);
+                        string ReportSubject = Convert.ToString(evententry["ReportSubject"]);
+                        string ReportMessage = Convert.ToString(evententry["ReportMessage"]);
+                        string ReportEventIDs = Convert.ToString(evententry["ReportEvents"]);
+
+                        EventReport NewEventReport = new EventReport
+                        {
+                            ReportID = ReportID,
+                            TargetName = TargetName,
+                            TargetID = TargetID,
+                            ReporterName = ReporterName,
+                            ReporterID = ReporterID,
+                            ReportSubject = ReportSubject,
+                            ReportMessage = ReportMessage
+                        };
+
+                        string[] FoundEventIDs = ReportEventIDs.Split(' ');
+                        foreach (var FoundEventID in FoundEventIDs)
+                        {
+                            Int32 EventID = Convert.ToInt32(FoundEventID);
+                            NewEventReport.EventIDs.Add(EventID);
+
+                            PlayerEvent FoundPlayerEvent;
+                            if(FindPlayerEvent(EventID, out FoundPlayerEvent))
+                            {
+                                FoundPlayerEvent.ReportID = ReportID;
+                            }
+                            else
+                            {
+                                RaiseError($"!!! COULD NOT FIND EVENTID: {EventID} FOR REPORTID: {ReportID} !!!");
+                            }
+                        }
+
+                        EventReports.Add(ReportID, NewEventReport);
 
                         //the sql query above should have kept the ReportIDs in order...
                         NextReportID = ReportID + 1;
@@ -359,12 +446,12 @@ namespace Oxide.Plugins
             }
         }
 
-        //todo, these arguments look alot like RustigateExtension.RustigateDiscordPost.DiscordReportInfo
-        private void InsertReportedEventToDB(Int32 ReportID, string TargetName, ulong TargetID, string ReporterName, ulong ReporterID, string ReportSubject, string ReportMessage, List<Int32> EventIDs)
+        private void InsertEventReportIntoDB(EventReport eventReport)
         {
-            string EventIDsAsString = string.Join(",", EventIDs);
-            string sqlQuery = "INSERT INTO EventReports (`ReportID`, `TargetName`, TargetID`, `ReporterName`, `ReporterID`, `ReportSubject`, `ReportMessage`, `EventIDsAsString`) VALUES (@0, @1, @2, @3, @4, @5, @6, @7);";
-            Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, ReportID, EventIDs, TargetName, TargetID, ReporterName, ReporterID, ReportSubject, ReportMessage);
+            string EventIDsAsString = string.Join("!", eventReport.EventIDs);
+            Puts(EventIDsAsString);
+            string sqlQuery = "INSERT INTO EventReports (`ReportID`, `TargetName`, `TargetID`, `ReporterName`, `ReporterID`, `ReportSubject`, `ReportMessage`, `ReportEvents`) VALUES (@0, @1, @2, @3, @4, @5, @6, @7);";
+            Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, eventReport.ReportID, eventReport.TargetName, eventReport.TargetID, eventReport.ReporterName, eventReport.ReporterID, eventReport.ReportSubject, eventReport.ReportMessage, EventIDsAsString);
             sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
             {
                 if (rowsAffected == 0)
@@ -372,6 +459,38 @@ namespace Oxide.Plugins
                     RaiseError("Could not insert record into DB!");
                 }
             });
+        }
+
+        private void InsertEventIntoDB(PlayerEvent playerEvent)
+        {
+            {
+                string sqlQuery = "INSERT INTO Events (`EventID`, `EventTime`, `AttackerPlayerName`, `AttackerPlayerID`, `DemoFilename`) VALUES (@0, @1, @2, @3, @4);";
+                Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, playerEvent.EventTime, playerEvent.AttackerName, playerEvent.AttackerID, playerEvent.DemoFilename);
+                sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
+                {
+                    if (rowsAffected == 0)
+                    {
+                        RaiseError("Could not insert record into DB!");
+                    }
+                });
+            }
+            {
+                foreach (var EventVictim in playerEvent.EventVictims)
+                {
+                    string VictimName = EventVictim.Value.PlayerName;
+                    ulong VictimID = EventVictim.Value.PlayerID;
+                    DateTime EventTime = EventVictim.Value.EventTime;
+                    string sqlQuery = "INSERT INTO Victims (`EventID`, `VictimName`, `VictimID`, `EventTime`) VALUES (@0, @1, @2, @3);";
+                    Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, VictimName, VictimID, EventTime);
+                    sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
+                    {
+                        if (rowsAffected == 0)
+                        {
+                            RaiseError("Could not insert record into DB!");
+                        }
+                    });
+                }
+            }
         }
 
         #endregion
@@ -433,12 +552,12 @@ namespace Oxide.Plugins
 
         #region DiscordAPI
 
-        private void PrepareDiscordReport(ulong ReporterID, string ReporterName, string TargetName, string TargetID, string ReportSubject, string ReportMessage)
+        private void PrepareEventReport(ulong ReporterID, string ReporterName, string TargetName, string TargetID, string ReportSubject, string ReportMessage)
         {
             /* For this plugin's reports, the admin only wants to know two things: 
                - is there a demofile related to a report
                - and where is that demofile located.
-            our discord report should contain these, and hopefully todo: a convenient download link as well (this requires an oxide.Ext)
+            our discord report should contain these, and a convenient download link
             there are plenty of other report plugins that will handle normal reports threw discord. we only care about demos.
             */
 
@@ -446,7 +565,6 @@ namespace Oxide.Plugins
 
             if (_TargetID == 0)
             {
-                //bots dont seem to have a targetId
                 return;
             }
 
@@ -461,7 +579,7 @@ namespace Oxide.Plugins
                     if (DelayedReportEvents.Add(FoundPlayerEvent.EventID))
                     {
                         float MaxEventTime = FoundPlayerEvent.MaxEventTimer.Delay + 1.0f;
-                        Timer _timer = timer.Once(MaxEventTime, () => PrepareDiscordReport(ReporterID, ReporterName, TargetName, TargetID, ReportSubject, ReportMessage));
+                        Timer _timer = timer.Once(MaxEventTime, () => PrepareEventReport(ReporterID, ReporterName, TargetName, TargetID, ReportSubject, ReportMessage));
 
                         DebugSay($"delaying {FoundPlayerEvent.EventID} for {MaxEventTime}seconds");
                         ///dont return, otherwise if this player is constantly fighting we will never report something
@@ -485,35 +603,57 @@ namespace Oxide.Plugins
 
             List<string> VictimNames = new List<string>();
             List<string> DemoFilenames = new List<string>();
-            List<Int32> RelatedEventIDs = new List<Int32>();
+
+            EventReport NewEventReport = new EventReport()
+            {
+                ReportID = NextReportID,
+                TargetName = TargetName,
+                TargetID = Convert.ToUInt64(TargetID),
+                ReporterName = ReporterName,
+                ReporterID = ReporterID,
+                ReportSubject = ReportSubject,
+                ReportMessage = ReportMessage
+                ///EventIDs = x //related events are added below
+            };
+            ///we dont know if this report is valid yet... so dont add it     
+            ///ReportedEvents.Add(NextReportID, NewEventReport);         
 
             for (int i = PlayerEvents.Count - 1; i >= 0; i--)
             {
                 PlayerEvent playerEvent = PlayerEvents[i];
 
-                if(PlayerActiveEventID.ContainsKey(playerEvent.AttackerID))
+                //events that are active are already going to be reported via a delay
+                if (PlayerActiveEventID.ContainsKey(playerEvent.AttackerID))
                 {
+                    Puts($"{playerEvent.EventID} was active");
                     continue;
                 }
 
-                if (ReportedEvents.Contains(playerEvent.EventID))
+                //dont spam discord with already reported events
+                if (EventReports.ContainsKey(playerEvent.ReportID))
                 {
+                    Puts($"{playerEvent.EventID} was already reported");
                     continue;
                 }
 
+                /* any events up to an hour ago might be of interest in relation to the victim doing the report
+                 * usually when a player dies, they F7 report... they dont wait more then an hour */
                 if (playerEvent.EventTime < OneHourAgo)
                 {
+                    Puts($"{playerEvent.EventID} > an hour ago");
                     break;
                 }
 
                 //this event's attacker is the player who is being reported
+                Puts($"{playerEvent.AttackerID} == {_TargetID} ?");
                 if (playerEvent.AttackerID == _TargetID)
                 {
                     //the one doing the reporting needs to be, or be teamed, with one of the victims
-                    if (IsPlayerTeamedWith(ReporterID, playerEvent.EventVictims.Keys.ToList()))
+                    bool bIsReporterTeamedWithVictims = IsPlayerTeamedWith(ReporterID, playerEvent.EventVictims.Keys.ToList());
+                    Puts($"{ReporterID} teamed with {playerEvent.GetEventVictimNames()} == {bIsReporterTeamedWithVictims}");
+                    if (bIsReporterTeamedWithVictims)
                     {
                         DemoFilenames.Add(playerEvent.DemoFilename);
-                        ReportedEvents.Add(playerEvent.EventID);
 
                         foreach (var EventVictimInfo in playerEvent.EventVictims.Values)
                         {
@@ -524,15 +664,22 @@ namespace Oxide.Plugins
                             }
                         }
 
-                        RelatedEventIDs.Add(playerEvent.EventID);
+                        NewEventReport.EventIDs.Add(playerEvent.EventID);
+                        playerEvent.ReportID = NewEventReport.ReportID;
+                        Puts($"added {playerEvent.EventID} with reportid: {NewEventReport.ReportID}!");
                     }
                 }
             }
 
-            if (RelatedEventIDs.Count > 0)
+            if (NewEventReport.EventIDs.Count > 0)
             {
+                //we have a valid report, move the ID up for the next one
+                EventReports.Add(NextReportID, NewEventReport);
+                NextReportID++;
+
                 if (config.DiscordWebhookURL != "")
                 {
+                    //todo, can NewEventReport be used for this as well?
                     RustigateExtension.RustigateDiscordPost.UploadDiscordReportAsync(
                         DemoFilenames,
                         new RustigateDiscordPost.DiscordReportInfo(TargetID, TargetName, ReporterName, ReporterID.ToString(), ReportSubject, ReportMessage),
@@ -540,8 +687,7 @@ namespace Oxide.Plugins
                         DiscordPostCallback);
                 }
 
-                InsertReportedEventToDB(NextReportID, TargetName, Convert.ToUInt64(TargetID), ReporterName, ReporterID, ReportSubject, ReportMessage, RelatedEventIDs);
-                NextReportID++;
+                InsertEventReportIntoDB(NewEventReport);
             }
         }
 
@@ -565,18 +711,25 @@ namespace Oxide.Plugins
                 config.UploadDemosToDiscord,
                 server.LocalAddress.MapToIPv4().ToString()); //todo: is this the way to transfer config ???
 
+            ///it looks like in code, SQLITE runs queries in sequence on its own thread
+            ///so as long as these are in order things should work fine
             InitializeDB();
             LoadDBEvents();
-            LoadDBReportedEvents();
+            LoadDBEventVictims();
+            LoadDBEventReports();
         }
 
         private void Unload()
         {
 #if DEBUGMODE
-            Bots[0].Team.Disband();
+            if (Bots.Count > 0)
+            {
+                Bots[0].Team?.Disband();
+            }
+
             foreach (var Bot in Bots)
             {
-                if(Bot != null)
+                if (Bot != null)
                 {
                     Bot.Kill(BaseNetworkable.DestroyMode.Gib);
                 }
@@ -592,6 +745,9 @@ namespace Oxide.Plugins
 
             foreach (var player in BasePlayer.activePlayerList)
             {
+                CuiHelper.DestroyUi(player, "RTMainPanel");
+                CuiHelper.DestroyUi(player, "RTMainSearchPanel");
+
                 //we do this again here cause if the plugin crashed, this will stop zombie recordings
                 if (player.Connection.IsRecording)
                 {
@@ -607,9 +763,9 @@ namespace Oxide.Plugins
         {
 #if DEBUGMODE
             var BotTeam = RelationshipManager.ServerInstance.CreateTeam();
-            for (int i = 0; i < 5; i++)
+            for (int i = 0; i < NumBots; i++)
             {
-                BaseEntity baseEntity = GameManager.server.CreateEntity("assets/prefabs/player/player.prefab", new Vector3(78.3f + (i*1.25f), 15.0f + (i * 1.25f), -187.8f + (i*1.25f)));
+                BaseEntity baseEntity = GameManager.server.CreateEntity("assets/prefabs/player/player.prefab", new Vector3(78.3f + (i * 1.25f), 15.0f + (i * 1.25f), -187.8f + (i * 1.25f)));
                 if (baseEntity != null)
                 {
                     baseEntity.Spawn();
@@ -617,6 +773,17 @@ namespace Oxide.Plugins
                     Bots.Add(botplayer);
                     BotTeam.AddPlayer(botplayer);
                 }
+            }
+
+            {
+                var collectorplayer = Oxide.Game.Rust.RustCore.FindPlayerByName("collector");
+                if(collectorplayer != null)
+                {
+                    timer.Once(1.0f, () =>
+                    {
+                        ShowEventsUI(collectorplayer.IPlayer, "", null);
+                    });
+                } 
             }
 #endif
 
@@ -651,7 +818,7 @@ namespace Oxide.Plugins
                     /* there is a case where a player could jokenly report the attacker whos on the same team
                      only allow enemies to report attackers */
                     BasePlayer VictimPlayer = info.HitEntity.ToPlayer();
-                    if(!IsPlayerTeamedWith(attacker, VictimPlayer))
+                    if (!IsPlayerTeamedWith(attacker, VictimPlayer))
                     {
                         RecordPlayerEvent(attacker, VictimPlayer);
 
@@ -671,7 +838,7 @@ namespace Oxide.Plugins
             ulong ReporterID = reporter.userID;
             string ReporterName = reporter.displayName;
 
-            PrepareDiscordReport(ReporterID, ReporterName, targetName, targetId, subject, message);
+            PrepareEventReport(ReporterID, ReporterName, targetName, targetId, subject, message);
         }
 
         #endregion
@@ -712,7 +879,7 @@ namespace Oxide.Plugins
 
         private bool IsPlayerTeamedWith(BasePlayer InstigatorPlayer, ulong TargetPlayerID)
         {
-            return InstigatorPlayer.userID == TargetPlayerID 
+            return InstigatorPlayer.userID == TargetPlayerID
                 || InstigatorPlayer.Team != null ? InstigatorPlayer.Team.members.Contains(TargetPlayerID) : false;
         }
 
@@ -794,7 +961,7 @@ namespace Oxide.Plugins
         private void EndPlayerEvent(Int32 EventID, bool bSkipDBSave = false)
         {
             PlayerEvent playerEvent;
-            if(!FindPlayerEvent(EventID, out playerEvent))
+            if (!FindPlayerEvent(EventID, out playerEvent))
                 return;
 
             //can only end an event thats active or there wil bee trouble
@@ -811,35 +978,7 @@ namespace Oxide.Plugins
             //we save it to DB when the event ends to avoid too many updates during combat
             if (!bSkipDBSave)
             {
-                //todo: i want all db stuff in the DB region, make these into functions at some point...
-                {
-                    string sqlQuery = "INSERT INTO Events (`EventID`, `EventTime`, `AttackerPlayerName`, `AttackerPlayerID`, `DemoFilename`) VALUES (@0, @1, @2, @3, @4);";
-                    Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, playerEvent.EventTime, playerEvent.AttackerName, playerEvent.AttackerID, playerEvent.DemoFilename);
-                    sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
-                    {
-                        if (rowsAffected == 0)
-                        {
-                            RaiseError("Could not insert record into DB!");
-                        }
-                    });
-                }
-                {
-                    foreach (var EventVictim in playerEvent.EventVictims)
-                    {
-                        string VictimName = EventVictim.Value.PlayerName;
-                        ulong VictimID = EventVictim.Value.PlayerID;
-                        DateTime EventTime = EventVictim.Value.EventTime;
-                        string sqlQuery = "INSERT INTO Victims (`EventID`, `VictimName`, `VictimID`, `EventTime`) VALUES (@0, @1, @2, @3);";
-                        Sql insertCommand = Oxide.Core.Database.Sql.Builder.Append(sqlQuery, playerEvent.EventID, VictimName, VictimID, EventTime);
-                        sqlLibrary.Insert(insertCommand, sqlConnection, rowsAffected =>
-                        {
-                            if (rowsAffected == 0)
-                            {
-                                RaiseError("Could not insert record into DB!");
-                            }
-                        });
-                    }
-                }
+                InsertEventIntoDB(playerEvent);
             }
 
             PlayerActiveEventID.Remove(playerEvent.AttackerID);
@@ -901,6 +1040,731 @@ namespace Oxide.Plugins
 
             return BytesDeleted;
         }
+
+        #endregion
+
+        #region UI
+
+        [Flags]
+        private enum UISortOptions
+        {
+            EEventID = 0,
+            EReported = 1,
+            EAttackerName = 2,
+            EDate = 4
+        }
+
+        //remember what the admin has sorted for previously, allows faster activity resume when menu is re-opened
+        private Dictionary<ulong, UISortOptions> PlayerUISortOptions = new Dictionary<ulong, UISortOptions>();
+
+        //remember the page for the results the admin is currently viewing, for faster activity resume
+        private Dictionary<ulong, Int32> PlayerUIPage = new Dictionary<ulong, Int32>();
+
+        //return only a maximum events for any search queries, this is a UI limitation... theres no srolling in CUI
+        private static byte MaxResultsPerPage = 20;
+
+        #region SendUI
+        private void SendUIFramePanels(BasePlayer player)
+        {
+            CuiElementContainer EventsUI = new CuiElementContainer();
+            EventsUI.Add(new CuiPanel
+            {
+                Image = { Color = "0.20 0.1 0 1" },
+                RectTransform = {
+                    AnchorMin = "0.3 0.025",
+                    AnchorMax = "0.843 0.990"
+                },
+                CursorEnabled = true,
+                KeyboardEnabled = true
+            }, "Overlay", "RTMainPanel", "RTMainPanel");
+            EventsUI.Add(new CuiPanel
+            {
+                Image = { Color = "1 1 1 0.08" },
+                RectTransform = {
+                    AnchorMin = "0 0.955",
+                    AnchorMax = "1 1"
+                },
+            }, "RTMainPanel", "RTTitlePanel", "RTTitlePanel");
+            EventsUI.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = "Recorded Events",
+                    Color = "1 0.71 0 1",
+                    FontSize = 20,
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0",
+                    AnchorMax = "1 1"
+                }
+            }, "RTTitlePanel", "RTTitleText", "RTTitleText");
+            EventsUI.Add(new CuiButton
+            {
+                Button =
+                {
+                    Color = "0.39 0.18 0 1",
+                    Command = "hideevents",
+                },
+                Text =
+                {
+                    Text = "X",
+                    FontSize = 16,
+                    Color = "1 0.75 0 1",
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.956 0.956",
+                    AnchorMax = "0.9965 0.9965"
+                }
+            }, "RTMainPanel", "RTClose", "RTClose");
+            EventsUI.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "1 0.75 0 0.2"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.891",
+                    AnchorMax = "0.975 0.951"
+                }
+            }, "RTMainPanel", "RTColumnPanel", "RTColumnPanel");
+            EventsUI.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "0 0 0 0.5"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.11",
+                    AnchorMax = "0.975 0.891"
+                }
+            }, "RTMainPanel", "RTResultsPanel", "RTResultsPanel");
+            CuiHelper.AddUi(player, EventsUI);
+        }
+
+        private void SendUISearchFramePanels(BasePlayer player)
+        {
+            CuiElementContainer EventsUI = new CuiElementContainer();
+            EventsUI.Add(new CuiPanel
+            {
+                Image = { Color = "0.20 0.1 0 1" },
+                RectTransform = {
+                    AnchorMin = "0.022 0.685",
+                    AnchorMax = "0.178 0.963"
+                },
+                CursorEnabled = true,
+                KeyboardEnabled = true
+            }, "Overlay", "RTMainSearchPanel", "RTMainSearchPanel");
+            EventsUI.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = "search box stuff one day",
+                    FontSize = 16,
+                    Color = "1 1 1 1",
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0",
+                    AnchorMax = "1 1"
+                }
+            }, "RTMainSearchPanel", "RTSearchPanelTemp1", "RTSearchPanelTemp1");
+            CuiHelper.AddUi(player, EventsUI);
+        }
+
+        private CuiButton CreateSortButton(string ButtonCommand, string ButtonText, bool bUseAltColor, bool bIsSelected, string ButtonXMinAnchor, string ButtonXMaxAnchor)
+        {
+            string ButtonColor = bIsSelected ? "0.78 0.39 0 1" : (bUseAltColor ? "0.43 0.22 0 1" : "0.39 0.18 0 1");
+            CuiButton NewButton = new CuiButton
+            {
+                Button =
+                {
+                    Color = ButtonColor,
+                    Command = ButtonCommand != "" ? $"testcommand {ButtonCommand}" : "",
+                },
+                Text =
+                {
+                    Text = ButtonText,
+                    FontSize = 16,
+                    Color = "1 0.75 0 1",
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = $"{ButtonXMinAnchor} 0",
+                    AnchorMax = $"{ButtonXMaxAnchor} 1"
+                }
+            };
+
+            return NewButton;
+        }
+
+        private void SendUISortButtons(BasePlayer player)
+        {
+            UISortOptions SortOptions = UISortOptions.EEventID;
+            PlayerUISortOptions.TryGetValue(player.userID, out SortOptions);
+
+            CuiElementContainer EventsUI = new CuiElementContainer();
+
+            bool b1 = (SortOptions & UISortOptions.EReported) == UISortOptions.EReported;
+            EventsUI.Add(CreateSortButton("reportsort", "F7 ?", false, b1, "0", "0.088"), "RTColumnPanel", "RTReportedSortButton", "RTReportedSortButton");
+
+            bool b2 = (SortOptions & UISortOptions.EEventID) == UISortOptions.EEventID;
+            EventsUI.Add(CreateSortButton("EventIDSort", "ID", true, b2, "0.088", "0.176"), "RTColumnPanel", "RTEventIDSortButton", "RTEventIDSortButton");
+
+            bool b3 = (SortOptions & UISortOptions.EAttackerName) == UISortOptions.EAttackerName;
+            EventsUI.Add(CreateSortButton("AttackerSort", "Attacker Name", false, b3, "0.176", "0.427"), "RTColumnPanel", "RTAttackerNameSortButton", "RTAttackerNameSortButton");
+
+            bool b4 = (SortOptions & UISortOptions.EDate) == UISortOptions.EDate;
+            EventsUI.Add(CreateSortButton("DateSort", "Date", true, b4, "0.427", "0.69"), "RTColumnPanel", "RTDateSortButton", "RTDateSortButton");
+
+            //cant sort by victims
+            EventsUI.Add(CreateSortButton("", "Victims", false, false, "0.69", "1"), "RTColumnPanel", "RTVictimsSortButton", "RTVictimsSortButton");
+
+            CuiHelper.AddUi(player, EventsUI);
+        }
+
+        //todo: this function should contain search parameters ?
+        private void SendUIResults(BasePlayer player, Int32 Page)
+        {
+            //todo: this might not belong here yet...
+            UISortOptions SortOptions = UISortOptions.EEventID;
+            PlayerUISortOptions.TryGetValue(player.userID, out SortOptions);
+
+            int iter = -1; //used to visually align rows properly
+            bool bHitMaxResults = false;
+            CuiElementContainer EventsUI = new CuiElementContainer();
+
+            EventsUI.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "0 0 0 0.5"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.11",
+                    AnchorMax = "0.975 0.891"
+                }
+            }, "RTMainPanel", "RTResultsPanel", "RTResultsPanel");
+            CuiHelper.AddUi(player, EventsUI);
+
+            //todo: for now just look threw all the events, in the future need to pass a "Results" list to this
+            int StartIDX = Math.Max(0, PlayerEvents.Count - (Page * (MaxResultsPerPage+1)));
+            //Puts(StartIDX.ToString());
+            for (int i = StartIDX - 1; i >= 0; i--)
+            {
+                iter++;
+                PlayerEvent playerEvent = PlayerEvents[i];
+                Int32 EventID = playerEvent.EventID;
+
+                bool bUseAltColor = i % 2 == 1;
+
+                EventsUI.Add(new CuiPanel
+                {
+                    Image =
+                    {
+                        Color = bUseAltColor ? "0.41 0.15 0 1" : "0.31 0.1 0 1",
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = $"0 {0.953-(iter*0.047)}",
+                        AnchorMax = $"1 {1-(iter*0.047)}"
+                    }
+                }, "RTResultsPanel", $"RTResultID{EventID}", $"RTResultID{EventID}");
+                bool bIsEventReported = EventReports.ContainsKey(playerEvent.ReportID);
+                EventsUI.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = bIsEventReported ? "X" : "",
+                        FontSize = 16,
+                        Color = "1 1 1 1",
+                        Align = TextAnchor.MiddleCenter
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0 0",
+                        AnchorMax = "0.08 1"
+                    }
+                }, $"RTResultID{EventID}", $"RTResultID{EventID}Field1", $"RTResultID{EventID}Field1");
+                EventsUI.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = $"{playerEvent.EventID}",
+                        FontSize = 16,
+                        Color = "1 1 1 1",
+                        Align = TextAnchor.MiddleCenter
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.08 0",
+                        AnchorMax = "0.176 1"
+                    }
+                }, $"RTResultID{EventID}", $"RTResultID{EventID}Field2", $"RTResultID{EventID}Field2");
+                EventsUI.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = $"{playerEvent.AttackerName}",
+                        FontSize = 16,
+                        Color = "1 1 1 1",
+                        Align = TextAnchor.MiddleCenter
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.176 0",
+                        AnchorMax = "0.427 1"
+                    }
+                }, $"RTResultID{EventID}", $"RTResultID{EventID}Field3", $"RTResultID{EventID}Field3");
+                EventsUI.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = $"{playerEvent.EventTime.ToShortDateString()} {playerEvent.EventTime.ToShortTimeString()}",
+                        FontSize = 16,
+                        Color = "1 1 1 1",
+                        Align = TextAnchor.MiddleCenter
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.427 0",
+                        AnchorMax = "0.69 1"
+                    }
+                }, $"RTResultID{EventID}", $"RTResultID{EventID}Field4", $"RTResultID{EventID}Field4");
+                EventsUI.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = playerEvent.GetEventVictimNames(),
+                        FontSize = 16,
+                        Color = "1 1 1 1",
+                        Align = TextAnchor.MiddleCenter
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.69 0",
+                        AnchorMax = "1 1"
+                    }
+                }, $"RTResultID{EventID}", $"RTResultID{EventID}Field5", $"RTResultID{EventID}Field5");
+                EventsUI.Add(new CuiButton
+                {
+                    Button =
+                    {
+                        Command = $"RTUIShowEventInfo {EventID}",
+                        Color = "0 0 0 0"
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0 0",
+                        AnchorMax = "1 1"
+                    }
+                }, $"RTResultID{EventID}", $"RTResultID{EventID}Click", $"RTResultID{EventID}Click");
+
+                if (iter == MaxResultsPerPage)
+                {
+                    bHitMaxResults = true;
+                    break;
+                }
+            }
+
+            EventsUI.Add(new CuiPanel
+            {
+                Image =
+                    {
+                        Color = "0 0 0 0"
+                    },
+                RectTransform =
+                    {
+                        AnchorMin = "0.025 0.02",
+                        AnchorMax = "0.975 0.1"
+                    }
+            }, "RTMainPanel", "RTResultsPageInfoPanel", "RTResultsPageInfoPanel");
+            EventsUI.Add(new CuiLabel
+            {
+                Text =
+                    {
+                        Text = $"{Page+1}",
+                        FontSize = 24,
+                        Color = "1 1 1 1",
+                        Align = TextAnchor.MiddleCenter
+                    },
+                RectTransform =
+                    {
+                        AnchorMin = "0 0",
+                        AnchorMax = "1 1"
+                    }
+            }, "RTResultsPageInfoPanel", "RTResultsPageText", "RTResultsPageText");
+
+            //had some strange behavior with buttons not being sent/destroyed,
+            //so ganna keep them alive and just change anchor to "disable" them when needed
+            EventsUI.Add(new CuiButton
+            {
+                Button =
+                {
+                    Command = "RTUIResultsBack",
+                    Color = "0.58 0.19 0 1"
+                },
+                Text =
+                {
+                    Text = "<",
+                    Color = "0.78 0.39 0 1",
+                    FontSize = 24,
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = Page > 0 ? "0.35 0" : "0 0",
+                    AnchorMax = Page > 0 ? "0.45 1" : "0 0"
+                }
+            }, "RTResultsPageInfoPanel", "RTResultsBackButton", "RTResultsBackButton");
+
+            //had some strange behavior with buttons not being sent/destroyed,
+            //so ganna keep them alive and just change anchor to "disable" them when needed
+            EventsUI.Add(new CuiButton
+            {
+                Button =
+                {
+                    Command = "RTUIResultsForward",
+                    Color = "0.58 0.19 0 1"
+                },
+                Text =
+                {
+                    Text = ">",
+                    Color = "0.78 0.39 0 1",
+                    FontSize = 24,
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = bHitMaxResults ? "0.55 0" : "0 0",
+                    AnchorMax = bHitMaxResults ? "0.65 1" : "0 0"
+                }
+            }, "RTResultsPageInfoPanel", "RTResultsForwardButton", "RTResultsForwardButton");
+
+            CuiHelper.AddUi(player, EventsUI);
+        }
+
+        private void SendUIEventInfo(BasePlayer player, Int32 EventID)
+        {
+            PlayerEvent FoundPlayerEvent;
+            if (!FindPlayerEvent(EventID, out FoundPlayerEvent))
+            {
+                return;
+            }
+            CuiElementContainer EventsUI = new CuiElementContainer();
+
+            EventsUI.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "1 0.5 0 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.15 0.25",
+                    AnchorMax = "0.85 0.75"
+                }
+            }, "RTMainPanel", "RTEventInfoPanel", "RTEventInfoPanel");
+            EventsUI.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "0.25 0.1 0 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.005 0.005",
+                    AnchorMax = "0.995 0.995"
+                }
+            }, "RTEventInfoPanel", "RTEventInfoOutline", "RTEventInfoOutline");
+            EventsUI.Add(new CuiButton
+            {
+                Button =
+                {
+                    Color = "0.39 0.18 0 1",
+                    Command = "RTUIHideEventInfo",
+                },
+                Text =
+                {
+                    Text = "X",
+                    FontSize = 16,
+                    Color = "1 0.75 0 1",
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.94 0.94",
+                    AnchorMax = "1 1"
+                }
+            }, "RTEventInfoPanel", "RTEventInfoClose", "RTEventInfoClose");
+            EventsUI.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = $"EventID: {FoundPlayerEvent.EventID}",
+                    Color = "1 0.5 0 1",
+                    FontSize = 16
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.025",
+                    AnchorMax = "0.925 0.95"
+                }
+            }, "RTEventInfoPanel", "RTEventInfoID", "RTEventInfoID");
+            EventsUI.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = $"{FoundPlayerEvent.AttackerName} [{FoundPlayerEvent.AttackerID}]",
+                    Color = "1 0.5 0 1",
+                    FontSize = 16
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.075",
+                    AnchorMax = "0.925 0.90"
+                }
+            }, "RTEventInfoPanel", "RTEventInfoAttacker", "RTEventInfoAttacker");
+            EventsUI.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = $"{FoundPlayerEvent.EventTime.ToShortDateString()} [{FoundPlayerEvent.EventTime.ToShortTimeString()}]",
+                    Color = "1 0.5 0 1",
+                    FontSize = 16,
+                    Align = TextAnchor.UpperRight
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.025",
+                    AnchorMax = "0.925 0.95"
+                }
+            }, "RTEventInfoPanel", "RTEventInfoDate", "RTEventInfoDate");
+            EventsUI.Add(new CuiButton
+            {
+                Button =
+                {
+                    Command = $"RTUISendEventToDiscord {FoundPlayerEvent.EventID}",
+                    Color = "0.39 0.18 0 1"
+                },
+                Text =
+                {
+                    Text = $"Demo: {FoundPlayerEvent.DemoFilename}\n[Click to Send to Discord]",
+                    Color = "1 0.5 0 1",
+                    FontSize = 16,
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.700",
+                    AnchorMax = "0.925 0.825"
+                }
+            }, "RTEventInfoPanel", "RTEventInfoDemo", "RTEventInfoDemo");
+            EventsUI.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = $"Victims: {FoundPlayerEvent.GetEventVictimNames()}",
+                    Color = "1 0.5 0 1",
+                    FontSize = 16
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.275",
+                    AnchorMax = "0.925 0.65"
+                }
+            }, "RTEventInfoPanel", "RTEventInfoVictims", "RTEventInfoVictims");
+
+            //show report info if it exists
+            if(EventReports.ContainsKey(FoundPlayerEvent.ReportID))
+            {
+                EventReport eventReport = EventReports[FoundPlayerEvent.ReportID];
+                string CleanSubjectMessage = Regex.Replace(eventReport.ReportSubject, @"\t|\n|\r", " ");
+                string CleanReportMessage = Regex.Replace(eventReport.ReportMessage, @"\t|\n|\r", " ");
+                EventsUI.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = $"Reported by: {eventReport.ReporterName} [{eventReport.ReporterID}]\n\n" +
+                               $"{CleanSubjectMessage}\n" +
+                               $"{CleanReportMessage}",
+                        Color = "1 0.5 0 1",
+                        FontSize = 16
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.025 0.005",
+                        AnchorMax = "0.925 0.4"
+                    }
+                }, "RTEventInfoPanel", "RTEventInfoReportText", "RTEventInfoReportText");
+            }
+
+            CuiHelper.AddUi(player, EventsUI);
+        }
+
+        #endregion
+
+        #region UIChatCommands
+
+        [Command("showevents")]
+        private void ShowEventsUI(IPlayer player, string command, string[] args)
+        {
+            //allow non admins with the "viewdemoevents" permission to use this command
+            if (!player.HasPermission("viewdemoevents"))
+                if (!player.IsAdmin)
+                    return;
+
+            BasePlayer FoundPlayer = Oxide.Game.Rust.RustCore.FindPlayerByIdString(player.Id); //this is dumb as shtt
+            SendUIFramePanels(FoundPlayer);
+            SendUISearchFramePanels(FoundPlayer);
+            SendUISortButtons(FoundPlayer);
+
+            Int32 FoundPage = 0;
+            PlayerUIPage.TryGetValue(FoundPlayer.userID, out FoundPage);
+            SendUIResults(FoundPlayer, FoundPage);
+        }
+
+        [Command("hideevents")]
+        private void HideEventsUI(IPlayer player, string command, string[] args)
+        {
+            BasePlayer FoundPlayer = Oxide.Game.Rust.RustCore.FindPlayerByIdString(player.Id); //this is dumb as shtt
+            CuiHelper.DestroyUi(FoundPlayer, "RTMainPanel");
+            CuiHelper.DestroyUi(FoundPlayer, "RTMainSearchPanel");
+        }
+
+        [Command("testcommand")]
+        private void TestCommand(IPlayer player, string command, string[] args)
+        {
+            player.Message($"{command} {args[0]}");
+        }
+
+        [Command("RTUIResultsBack")]
+        private void RTUIResultsBack(IPlayer player, string command, string[] args)
+        {
+            //allow non admins with the "viewdemoevents" permission to use this command
+            if (!player.HasPermission("viewdemoevents"))
+                if (!player.IsAdmin)
+                    return;
+
+            //todo: atm theres a problem with this, we dont have any results to send
+            //for now this works...
+            BasePlayer FoundPlayer = Oxide.Game.Rust.RustCore.FindPlayerByIdString(player.Id); //this is dumb as shtt
+            Int32 FoundPage = 0;
+            if (!PlayerUIPage.ContainsKey(FoundPlayer.userID))
+            {
+                PlayerUIPage.Add(FoundPlayer.userID, 0);
+            }
+
+            FoundPage = Math.Max(0, PlayerUIPage[FoundPlayer.userID] - 1);
+            PlayerUIPage[FoundPlayer.userID] = FoundPage;
+
+            SendUIResults(FoundPlayer, FoundPage);
+        }
+
+        [Command("RTUIResultsForward")]
+        private void RTUIResultsForward(IPlayer player, string command, string[] args)
+        {
+            //allow non admins with the "viewdemoevents" permission to use this command
+            if (!player.HasPermission("viewdemoevents"))
+                if (!player.IsAdmin)
+                    return;
+
+            //todo: atm theres a problem with this, we dont have any results to send
+            //for now this works...
+            BasePlayer FoundPlayer = Oxide.Game.Rust.RustCore.FindPlayerByIdString(player.Id); //this is dumb as shtt
+            Int32 FoundPage = 0;
+            if (!PlayerUIPage.ContainsKey(FoundPlayer.userID))
+            {
+                PlayerUIPage.Add(FoundPlayer.userID, 0);
+            }
+
+            FoundPage = Math.Max(0, PlayerUIPage[FoundPlayer.userID] + 1);
+            PlayerUIPage[FoundPlayer.userID] = FoundPage;
+
+            SendUIResults(FoundPlayer, FoundPage);
+        }
+
+        [Command("RTUIShowEventInfo")]
+        private void RTUIShowEventInfo(IPlayer player, string command, string[] args)
+        {
+            //allow non admins with the "viewdemoevents" permission to use this command
+            if (!player.HasPermission("viewdemoevents"))
+                if (!player.IsAdmin)
+                    return;
+
+            BasePlayer FoundPlayer = Oxide.Game.Rust.RustCore.FindPlayerByIdString(player.Id); //this is dumb as shtt
+            if (args.Count() > 0)
+            {
+                Int32 EventID = Convert.ToInt32(args[0]);
+                SendUIEventInfo(FoundPlayer, EventID);
+            }
+        }
+
+        [Command("RTUIHideEventInfo")]
+        private void RTUIHideEventInfo(IPlayer player, string command, string[] args)
+        {
+            BasePlayer FoundPlayer = Oxide.Game.Rust.RustCore.FindPlayerByIdString(player.Id); //this is dumb as shtt
+            CuiHelper.DestroyUi(FoundPlayer, "RTEventInfoPanel");
+        }
+
+        [Command("RTUISendEventToDiscord")]
+        private void RTUISendEventToDiscord(IPlayer player, string command, string[] args)
+        {
+            //allow non admins with the "viewdemoevents" permission to use this command
+            if (!player.HasPermission("viewdemoevents"))
+                if (!player.IsAdmin)
+                    return;
+
+            Int32 EventID = Convert.ToInt32(args[0]);
+            PlayerEvent FoundPlayerEvent;
+            if (!FindPlayerEvent(EventID, out FoundPlayerEvent))
+            {
+                player.Message($"Invalid event:{EventID}");
+                return;
+            }
+
+            //this basically replaces the button with a SENT thing
+            //todo: this is ugly and requires this and the actual button to be visually equal 
+            CuiElementContainer EventsUI = new CuiElementContainer();
+            EventsUI.Add(new CuiButton
+            {
+                Button =
+                {
+                    Command = "",
+                    Color = "0.39 0.18 0 1"
+                },
+                Text =
+                {
+                    Text = $"Demo: {FoundPlayerEvent.DemoFilename}\n[!!! SENT !!!]",
+                    Color = "1 0.5 0 1",
+                    FontSize = 16,
+                    Align = TextAnchor.MiddleCenter
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.025 0.700",
+                    AnchorMax = "0.925 0.825"
+                }
+            }, "RTEventInfoPanel", "RTEventInfoDemo", "RTEventInfoDemo");
+            BasePlayer FoundPlayer = Oxide.Game.Rust.RustCore.FindPlayerByIdString(player.Id); //this is dumb as shtt
+            CuiHelper.AddUi(FoundPlayer, EventsUI);
+
+            if (config.DiscordWebhookURL != "")
+            {
+                //todo, can NewEventReport be used for this as well?
+                RustigateExtension.RustigateDiscordPost.UploadSimpleFileMessageAsync(new List<string>{ FoundPlayerEvent.DemoFilename }, FoundPlayerEvent.AttackerName, $"**Demofile requested ingame by {player.Name} [{player.Id}] for EventID: {FoundPlayerEvent.EventID}**", DiscordPostCallback);
+            }
+        }
+
+        #endregion
 
         #endregion
     }
